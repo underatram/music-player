@@ -1,0 +1,48 @@
+{
+  "name": "music-player",
+  "productName": "Music",
+  "version": "0.10.0",
+  "description": "A music player for your local library",
+  "homepage": "https://github.com/underatram/music-player",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/underatram/music-player.git"
+  },
+  "license": "MIT",
+  "desktopName": "music-player.desktop",
+  "main": "electron/main.js",
+  "author": {
+    "name": "underatram",
+    "email": "19960972+underatram@users.noreply.github.com"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --linux deb"
+  },
+  "build": {
+    "appId": "io.github.underatram.music",
+    "files": [
+      "index.html",
+      "style.css",
+      "js/**",
+      "fonts/**",
+      "electron/**",
+      "LICENSE"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "linux": {
+      "target": "deb",
+      "category": "AudioVideo",
+      "syncDesktopName": true,
+      "icon": "build/icon.png",
+      "maintainer": "underatram <19960972+underatram@users.noreply.github.com>"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0"
+  }
+}
