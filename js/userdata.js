@@ -48,6 +48,53 @@ const UserData = (() => {
     save();
   }
 
+  function mergeSongs(moved, existing) {
+    return {
+      ...existing,
+      ...moved,
+      plays: (moved.plays || 0) + (existing.plays || 0) || undefined,
+      lastPlayed: Math.max(moved.lastPlayed || 0, existing.lastPlayed || 0) || undefined,
+      favourite: moved.favourite || existing.favourite,
+    };
+  }
+
+  // An edit changes the tags a song is known by, so its history goes with it.
+  // keepOld is for when another copy of the song still has the old tags.
+  function moveSong(oldKey, newKey, keepOld = false) {
+    if (oldKey === newKey) return;
+    const moved = data.songs[oldKey];
+    if (moved) {
+      const merged = data.songs[newKey] ? mergeSongs(moved, data.songs[newKey]) : moved;
+      data.songs[newKey] = JSON.parse(JSON.stringify(merged));
+      if (!keepOld) delete data.songs[oldKey];
+    }
+    for (const playlist of data.playlists) {
+      const at = playlist.songs.indexOf(oldKey);
+      if (at < 0 || keepOld) continue;
+      if (playlist.songs.includes(newKey)) playlist.songs.splice(at, 1);
+      else playlist.songs[at] = newKey;
+    }
+    save();
+  }
+
+  // Plays made on the iPod. The ledger remembers how many of each song's plays
+  // have already been counted, so bringing them back twice can't double them.
+  function addIpodPlays(ipodPath, key, total, lastPlayed) {
+    data.ipodPlays = data.ipodPlays || {};
+    const counted = data.ipodPlays[ipodPath] || 0;
+    const fresh = total - counted;
+    if (fresh <= 0) return 0;
+    const entry = { ...(data.songs[key] || {}) };
+    entry.plays = (entry.plays || 0) + fresh;
+    entry.lastPlayed = Math.max(entry.lastPlayed || 0, lastPlayed || 0) || undefined;
+    data.songs[key] = entry;
+    data.ipodPlays[ipodPath] = total;
+    save();
+    return fresh;
+  }
+
+  const ipodPlaysCounted = (ipodPath) => (data.ipodPlays && data.ipodPlays[ipodPath]) || 0;
+
   const isLongListen = (track) => LONG_LISTEN_GENRES.has(track.genreKey);
   const orDefault = (value, fallback) => (value === undefined ? fallback : value);
 
@@ -105,6 +152,9 @@ const UserData = (() => {
   return {
     load,
     flush,
+    moveSong,
+    addIpodPlays,
+    ipodPlaysCounted,
     isFavourite: (track) => Boolean(song(track).favourite),
     toggleFavourite: (track) => update(track, { favourite: !song(track).favourite }),
     setFavourite: (track, on) => update(track, { favourite: on }),

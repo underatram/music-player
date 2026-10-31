@@ -13,6 +13,8 @@
     <symbol id="i-next" viewBox="0 0 24 24"><path d="M15.500 5H18v14h-2.500zM4 5l10.500 7L4 19z"/></symbol>
     <symbol id="i-prev" viewBox="0 0 24 24"><path d="M6 5h2.500v14H6zM20 5v14L9.500 12z"/></symbol>
     <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M3 7h3.500c1.800 0 3.300.9 4.300 2.400l2.400 5.200c1 1.500 2.500 2.400 4.300 2.400H20M3 17h3.500c1.800 0 3.300-.9 4.300-2.400M13.200 9.400C14.200 7.900 15.700 7 17.500 7H20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18 3.500 22 7l-4 3.500zM18 13.500l4 3.500-4 3.500z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.200" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-eject" viewBox="0 0 24 24"><path d="M12 5l7 9H5zM5 17h14v2.500H5z"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.200" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 2.500 20.500 6 17 9.500M3.500 11V9.500A3.500 3.500 0 0 1 7 6h13.500M7 21.500 3.500 18 7 14.500M20.500 13v1.500a3.500 3.500 0 0 1-3.500 3.500H3.500" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.500S3.500 15.500 3.500 9.200A4.700 4.700 0 0 1 12 6.500a4.700 4.700 0 0 1 8.500 2.700c0 6.300-8.500 11.300-8.500 11.300z"/></symbol>
@@ -64,13 +66,17 @@
 
     <div class="body">
       <aside class="side">
-        <div id="shelves" class="shelves" role="tablist" aria-label="Library"></div>
+        <button id="shelf-button" class="shelf-button" aria-haspopup="menu" aria-expanded="false" aria-label="Choose a library">
+          <span id="shelf-label">Music</span>
+          <svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg>
+        </button>
         <input id="search" class="search" type="search" placeholder="Search music" aria-label="Search music" autocomplete="off">
         <nav id="nav" class="nav" aria-label="Library"></nav>
         <section id="playlists" class="playlists" aria-label="Playlists" hidden></section>
+        <section id="devices" class="devices" aria-label="Devices" hidden></section>
         <div class="side-foot">
           <p id="scan-status" class="scan-status" role="status"></p>
-          <button id="change-folder" class="link-button" hidden>Change folder</button>
+          <button id="manage-library" class="link-button" aria-haspopup="menu" aria-expanded="false" hidden>Manage Library</button>
         </div>
       </aside>
 

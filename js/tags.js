@@ -112,8 +112,14 @@ const Tags = (() => {
       case 'TPE1': setText(out, 'artist', text); break;
       case 'TPE2': setText(out, 'albumArtist', text); break;
       case 'TALB': setText(out, 'album', text); break;
-      case 'TRCK': setNumber(out, 'trackNo', text); break;
-      case 'TPOS': setNumber(out, 'discNo', text); break;
+      case 'TRCK':
+        setNumber(out, 'trackNo', text);
+        setNumber(out, 'trackTotal', text.split('/')[1]);
+        break;
+      case 'TPOS':
+        setNumber(out, 'discNo', text);
+        setNumber(out, 'discTotal', text.split('/')[1]);
+        break;
       case 'TYER':
       case 'TDRC': setYear(out, text); break;
       case 'TCMP': out.compilation = text === '1'; break;

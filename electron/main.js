@@ -1,13 +1,17 @@
 // The desktop app's main process: the window, the chosen music folder, and
-// read-only access to the files inside it.
+// access to the files inside it.
 const { app, BrowserWindow, Menu, dialog, ipcMain, protocol } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { Readable } = require('node:stream');
+const Id3 = require('./id3');
+const Ipod = require('./ipod');
 
 const AUDIO_EXTENSIONS = /\.(mp3|flac|ogg|oga|opus|m4a|aac|wav)$/i;
 const MAX_READ_BYTES = 128 * 1024 * 1024;
 const SCAN_PROGRESS_EVERY = 250;
+const MAX_COVER_BYTES = 20 * 1024 * 1024;
+const WRITE_PROGRESS_MS = 200;
 const MIME_TYPES = {
   '.mp3': 'audio/mpeg',
   '.flac': 'audio/flac',
@@ -141,6 +145,42 @@ function setupIpc() {
   ipcMain.on('host:write-data-now', (event, data) => {
     writeUserData(data);
     event.returnValue = true;
+  });
+
+  ipcMain.handle('host:ipod', () => Ipod.describe());
+  ipcMain.handle('host:eject-ipod', () => Ipod.eject());
+  ipcMain.handle('host:mount-ipod', () => Ipod.mount());
+  ipcMain.handle('host:ipod-songs', () => Ipod.songs());
+  ipcMain.handle('host:ipod-sync', (event, request) => Ipod.sync(request, {
+    helper: app.isPackaged ? path.join(process.resourcesPath, 'ipod-helper') : path.join(__dirname, '..', 'native', 'ipod-helper'),
+    backupRoot: path.join(app.getPath('userData'), 'ipod-backups'),
+    onProgress: (progress) => event.sender.send('host:ipod-progress', progress),
+  }));
+  ipcMain.handle('host:ipod-stop', () => Ipod.stopSync());
+
+  ipcMain.handle('host:read-tags', (_event, fullPath) => Id3.readDetails(assertInsideFolder(fullPath)));
+
+  ipcMain.handle('host:write-tags', (event, fullPath, request) => {
+    let lastSent = 0;
+    return Id3.writeTags(assertInsideFolder(fullPath), request, (fraction) => {
+      if (Date.now() - lastSent < WRITE_PROGRESS_MS) return;
+      lastSent = Date.now();
+      event.sender.send('host:write-progress', fraction);
+    });
+  });
+
+  ipcMain.handle('host:pick-image', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a cover',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png'] }],
+    });
+    if (result.canceled || !result.filePaths.length) return null;
+    const { size } = await fs.promises.stat(result.filePaths[0]);
+    if (size > MAX_COVER_BYTES) throw new Error('That image is too large. Choose one under 20 MB.');
+    const data = await fs.promises.readFile(result.filePaths[0]);
+    if (!Id3.imageType(data)) throw new Error('That isn\'t a JPEG or PNG image.');
+    return new Uint8Array(data);
   });
 
   ipcMain.handle('host:read', async (_event, fullPath, start, end) => {

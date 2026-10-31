@@ -14,6 +14,42 @@ const App = (() => {
   ];
   const SMART_LIST_SIZE = 100;
   const POSITION_SAVE_MS = 5000;
+  const CONTINUE_CARDS = 2;
+  const DRIVE_CHECK_MS = 3000;
+  const IPOD_SPARE_BYTES = 500 * 1000 * 1000; // left free so the iPod keeps working well
+  const UNTICKED_KEY = 'ipodUnticked';
+  const MAX_EDIT_SONGS = 2000;
+  const EDIT_READS_AT_ONCE = 16;
+  const EDIT_SAVE_EVERY = 25;
+  // The boxes in the edit window. Spans are out of six columns.
+  const ALBUM_FIELDS = [
+    { key: 'album', label: 'Album', span: 6 },
+    { key: 'albumArtist', label: 'Album Artist', span: 3 },
+    { key: 'genre', label: 'Genre', span: 3 },
+    { key: 'year', label: 'Year', span: 2, numeric: true },
+    { key: 'disc', label: 'Disc', span: 2, numeric: true },
+    { key: 'discTotal', label: 'Of', span: 2, numeric: true },
+  ];
+  const SONG_FIELDS = [
+    { key: 'title', label: 'Title', span: 6 },
+    { key: 'artist', label: 'Artist', span: 3 },
+    { key: 'albumArtist', label: 'Album Artist', span: 3 },
+    { key: 'album', label: 'Album', span: 6 },
+    { key: 'genre', label: 'Genre', span: 3 },
+    { key: 'year', label: 'Year', span: 3, numeric: true },
+    { key: 'track', label: 'Track', span: 1, numeric: true },
+    { key: 'trackTotal', label: 'Of', span: 1, numeric: true },
+    { key: 'disc', label: 'Disc', span: 1, numeric: true },
+    { key: 'discTotal', label: 'Of', span: 1, numeric: true },
+    { key: 'composer', label: 'Composer', span: 2 },
+    { key: 'comment', label: 'Comment', span: 6 },
+  ];
+  const ROW_FIELDS = [
+    { key: 'track', label: 'Track', numeric: true },
+    { key: 'title', label: 'Title' },
+    { key: 'artist', label: 'Artist' },
+  ];
+  const NEW_MUSIC_LIST = 'new-music';
   const NEAR_END_SECONDS = 5;
   const SMART_PLAYLISTS = [
     {
@@ -114,13 +150,6 @@ const App = (() => {
   ];
   // Takes the Genre column's place in Recently Played.
   const LAST_PLAYED_COLUMN = { label: 'Last Played', value: (t) => UserData.lastPlayed(t) || null };
-  const EPISODE_COLUMNS = [
-    { label: 'Episode', className: 'column-title', value: (t) => t.title },
-    { label: 'Year', value: (t) => t.year },
-    { label: 'Time', className: 'column-time', value: (t) => t.duration },
-    { label: 'Progress', value: (t) => secondsLeft(t) },
-  ];
-  const SHOW_COLUMN = { label: 'Show', value: (t) => t.album };
 
   const $ = (selector) => document.querySelector(selector);
   const content = $('#content');
@@ -134,6 +163,7 @@ const App = (() => {
   let shelf = SHELVES[0]; // Music, Podcasts or Audiobooks
   const shelfPlaces = new Map(); // where each one was left: { path, openSection }
   let shelfCache = { source: null, lists: {} };
+  let heroBook = null; // the book at the top of the Audiobooks page
   let openSection = null; // the tab open while browsing
   const flipped = new Set(); // tabs opened or closed by hand during a search
   const filterScroll = new Map(); // each tab's scroll position
@@ -146,6 +176,16 @@ const App = (() => {
   let query = '';
   let scanning = false;
   let savedFolder = null;
+  let driveMissing = false; // the chosen folder has gone, usually an unplugged drive
+  let refreshing = false; // a check of the folder is running
+  let scanReport = null; // what the last scan found, until it's dismissed
+  let newMusicPaths = new Set(); // the songs the last scan added
+  let ipod = null; // the connected iPod, if there is one
+  let ipodOpen = false; // its page is showing instead of the library
+  let ipodStamp = ''; // changes when there's something new to show
+  let ipodSongs = []; // every song on the iPod
+  let ipodSync = null; // how a running sync is going
+  let ipodResult = null; // what the last sync did
   let songList = null; // the virtual list of songs on screen
   let filterLists = []; // the virtual lists in the sidebar
   let toastTimer = null;
@@ -287,21 +327,46 @@ const App = (() => {
     return Math.max(0, book.tracks.findIndex((t) => !UserData.plays(t)));
   }
 
-  function renderShelves() {
-    $('#shelves').replaceChildren(...SHELVES.map((s) => el('button', {
-      class: 'shelf',
-      role: 'tab',
-      'aria-selected': s === shelf ? 'true' : 'false',
-      onclick: () => {
-        if (s !== shelf) setShelf(s);
-      },
-    }, s.label)));
+  function shelfCount(s) {
+    if (s.id === 'music') return plural(tracksIn('music').length, 'song');
+    return plural(Library.groups('album', tracksIn(s.id)).length, s.id === 'podcasts' ? 'show' : 'book');
+  }
+
+  function openManageMenu() {
+    const button = $('#manage-library');
+    const { left, top } = button.getBoundingClientRect();
+    const { width } = $('.side-foot').getBoundingClientRect();
+    showMenu({ clientX: left, clientY: top - 4 }, [
+      ...(Host ? [{ label: 'Scan Folder for Changes', action: scanFolder }, 'line'] : []),
+      { label: 'Change Folder…', action: pickFolder },
+    ], { width, above: true });
+    button.setAttribute('aria-expanded', 'true');
+  }
+
+  function renderShelfSwitch() {
+    $('#shelf-label').textContent = shelf.label;
     searchInput.placeholder = shelf.search;
     searchInput.setAttribute('aria-label', shelf.search);
   }
 
+  function openShelfMenu() {
+    const button = $('#shelf-button');
+    const { left, bottom, width } = button.getBoundingClientRect();
+    showMenu({ clientX: left, clientY: bottom + 4 }, SHELVES.map((s) => ({
+      label: s.label,
+      detail: shelfCount(s),
+      checked: s === shelf,
+      radio: true,
+      action: () => {
+        if (s !== shelf) setShelf(s);
+      },
+    })), { width });
+    button.setAttribute('aria-expanded', 'true');
+  }
+
   // Each one keeps its own place. A search belongs to the tab it was typed in.
   function setShelf(next) {
+    ipodOpen = false;
     shelfPlaces.set(shelf.id, { path, openSection });
     shelf = next;
     const place = shelfPlaces.get(shelf.id) || { path: [], openSection: null };
@@ -334,17 +399,18 @@ const App = (() => {
   }
 
   // Starts a list. Anything already in Up Next plays first, and says so.
-  function startList(tracks, index = null, options = {}) {
+  function startList(tracks, index = null, { name = null, ...options } = {}) {
     const waiting = Player.upNext.length;
     Player.playList(tracks, index, options);
     if (!waiting) return;
-    const name = path.length ? path[path.length - 1].label : 'this list';
-    showToast(`${plural(waiting, 'queued song')} will play first, then ${name}.`);
+    const listName = name || (path.length ? path[path.length - 1].label : 'this list');
+    showToast(`${plural(waiting, 'queued song')} will play first, then ${listName}.`);
   }
 
   // ---- Which songs are showing ----
 
   function playlistTracks(id) {
+    if (id === NEW_MUSIC_LIST) return tracksIn(shelf.id).filter((t) => newMusicPaths.has(t.path));
     const smart = ALL_SMART_LISTS.find((p) => p.value === id);
     if (smart) return smart.tracks();
     const playlist = UserData.findPlaylist(id);
@@ -402,6 +468,8 @@ const App = (() => {
 
   function selectPath(next) {
     path = next;
+    ipodOpen = false;
+    scanReport = null;
     clearSelection();
     scroller.scrollTop = 0;
     render();
@@ -560,26 +628,15 @@ const App = (() => {
     box.scrollTop = top;
   }
 
-  // The Podcasts and Audiobooks sidebars: what's under way, then shows or authors.
+  // The Podcasts and Audiobooks sidebars: everything, then what's under way.
   function renderListening(row) {
+    const all = {
+      label: shelf.id === 'podcasts' ? 'All Shows' : 'All Books',
+      path: [],
+      isCurrent: () => !path.length || path[0].field === 'album',
+    };
     const listening = matchingPlaylists(shelf.smart.map(({ value, label }) => ({ value, label })));
-    const isBooks = shelf.id === 'audiobooks';
-    const field = isBooks ? 'artist' : 'album';
-    const groups = Library.groups(field, matched, { byName: true });
-    const entries = groups.map((group) => ({
-      label: group.label,
-      path: [{ field, value: group.value, label: group.label }],
-      isCurrent: () => path.length > 0 && path[0].field === field && path[0].value === group.value,
-    }));
-    if (isBooks && !query) {
-      entries.unshift({ label: 'All Authors', path: [], isCurrent: () => !path.length });
-    }
-    return [
-      listening.length ? el('h2', { class: 'playlists-heading' }, 'Listening') : null,
-      ...listening.map(row),
-      entries.length ? el('h2', { class: 'playlists-heading' }, isBooks ? 'Authors' : 'Shows') : null,
-      ...entries.map(row),
-    ].filter(Boolean);
+    return [all, ...listening].map(row);
   }
 
   // ---- Song list ----
@@ -644,15 +701,45 @@ const App = (() => {
   }
 
   function selectAllShown() {
-    if (shelf.id === 'audiobooks' || nextField() || !visibleTracks.length) return;
+    if (!songList || nextField() || !visibleTracks.length) return;
     visibleTracks.forEach((track) => selection.add(track));
     refreshSelection();
   }
 
-  function episodeRow(track, tracks, index, showShow) {
+  // ---- Podcasts and Audiobooks pages ----
+
+  const coverObserver = new IntersectionObserver((entries) => {
+    for (const { isIntersecting, target } of entries) {
+      if (!isIntersecting) continue;
+      coverObserver.unobserve(target);
+      target.append(Covers.element(target.coverTrack, 'cover cover-fill'));
+    }
+  }, { root: scroller, rootMargin: '300px' });
+
+  // Holds a cover's place, and only reads it from the file once it's nearly on screen.
+  function coverTile(track, className) {
+    const tile = el('span', { class: `cover-tile ${className}` });
+    tile.coverTrack = track;
+    coverObserver.observe(tile);
+    return tile;
+  }
+
+  function progressBar(percent) {
+    if (!percent) return null;
+    return el('span', { class: `progress-bar ${percent >= 100 ? 'progress-bar-done' : ''}` },
+      el('span', { class: 'progress-bar-fill', style: `width: ${percent}%` }));
+  }
+
+  function episodePercent(track) {
+    if (UserData.position(track) > 0 && track.duration) return (UserData.position(track) / track.duration) * 100;
+    return UserData.plays(track) ? 100 : 0;
+  }
+
+  function episodeRow(track, tracks, index, withShow) {
     const progress = episodeProgress(track);
+    const details = [withShow ? track.album : null, track.year, track.duration ? formatTotal(track.duration) : null];
     return el('button', {
-      class: `row ${selection.has(track) ? 'row-selected' : ''} ${progress === 'Played' ? 'row-done' : ''}`,
+      class: `row episode ${selection.has(track) ? 'row-selected' : ''} ${progress === 'Played' ? 'row-done' : ''}`,
       'data-track': track.id,
       'aria-current': Player.track && Player.track.id === track.id ? 'true' : null,
       onclick: (event) => clickSongRow(event, tracks, index),
@@ -661,71 +748,204 @@ const App = (() => {
         showSongMenu(event, track);
       },
     },
-      el('span', { class: 'row-title' }, track.title),
-      el('span', { class: 'row-sub' }, progress || track.album),
-      showShow ? el('span', { class: 'row-album' }, track.album) : null,
-      el('span', { class: 'row-year' }, track.year ? String(track.year) : ''),
-      el('span', { class: 'row-time' }, formatTime(track.duration)),
-      el('span', { class: 'row-progress', 'data-left': progress.endsWith('left') ? 'true' : null }, progress));
+      el('span', { class: 'episode-text' },
+        el('span', { class: 'row-title' }, track.title),
+        el('span', { class: 'episode-meta' }, details.filter(Boolean).join(' · '))),
+      el('span', { class: 'episode-progress' },
+        el('span', { class: 'episode-left', 'data-left': progress.endsWith('left') ? 'true' : null }, progress),
+        progressBar(episodePercent(track))));
   }
 
-  function bookRow(book) {
-    const progress = bookProgress(book);
-    const { groupArtist, albumYear, albumKey } = book.tracks[0];
+  function episodeList(tracks, withShow) {
+    const rows = el('div', { class: 'rows' });
+    songList = virtualList(scroller, rows, tracks.length, cssPixels('--episode-height'), (i) => episodeRow(tracks[i], tracks, i, withShow));
+    return el('div', { class: 'rows-wrap' }, rows);
+  }
+
+  const selectionCount = () => el('span', { class: 'selection-count' }, selection.size ? `${selection.size.toLocaleString()} selected` : '');
+
+  // Search results, In Progress and Recently Played.
+  function renderEpisodeLists() {
+    const tracks = baseTracks();
+    visibleTracks = tracks;
+    const total = tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+    const details = [plural(tracks.length, query && !path.length ? 'result' : 'episode')];
+    if (total) details.push(formatTotal(total));
+    return [
+      el('h1', { class: 'heading' }, path.length ? path[0].label : `Results for “${query}”`),
+      el('p', { class: 'meta' }, details.join(' · ')),
+      tracks.length ? el('div', { class: 'page-links' },
+        el('button', { class: 'page-link', onclick: () => startList(visibleTracks, 0, { inOrder: true }) }, icon('play'), 'Play'),
+        selectionCount()) : null,
+      tracks.length ? episodeList(tracks, true) : el('p', { class: 'empty' }, emptyMessage()),
+    ].filter(Boolean);
+  }
+
+  function renderShowPage() {
+    const tracks = baseTracks();
+    visibleTracks = tracks;
+    const started = tracks.findIndex((t) => UserData.position(t) > 0);
+    // The newest episode: the latest year, and the last of that year in the show's order.
+    const newest = tracks.reduce((best, t, i) => ((t.year || 0) >= (tracks[best].year || 0) ? i : best), 0);
+    const start = started >= 0 ? started : newest;
+    const details = [tracks[0].groupArtist, plural(tracks.length, 'episode')];
+    return [
+      el('nav', { class: 'crumbs', 'aria-label': 'Back to' }, icon('back'),
+        el('button', { class: 'crumb', onclick: () => selectPath([]) }, 'Podcasts')),
+      el('div', { class: 'hero' },
+        coverTile(tracks[0], 'cover-show'),
+        el('div', { class: 'hero-text' },
+          el('h1', { class: 'heading' }, path[0].label),
+          el('p', { class: 'meta' }, details.join(' · ')),
+          el('div', { class: 'hero-actions' },
+            el('button', { class: 'hero-action', onclick: () => startList(tracks, start, { inOrder: true }) },
+              icon('play'),
+              el('span', { class: 'hero-action-label' }, started >= 0 ? `Carry On: ${tracks[started].title}` : 'Play Latest')),
+            selectionCount()))),
+      episodeList(tracks, false),
+    ];
+  }
+
+  function continueCard(track) {
     return el('button', {
-      class: `row ${book.left === 0 ? 'row-done' : ''}`,
-      'data-album': albumKey,
-      'aria-current': Player.track && Player.track.albumKey === albumKey ? 'true' : null,
-      onclick: () => startList(book.tracks, bookStart(book), { inOrder: true }),
+      class: 'continue-card',
+      onclick: () => selectPath([{ field: 'album', value: track.albumKey, label: track.album }]),
+      oncontextmenu: (event) => {
+        event.preventDefault();
+        showSongMenu(event, track);
+      },
+    },
+      coverTile(track, 'cover-continue'),
+      el('span', { class: 'continue-text' },
+        el('span', { class: 'continue-show' }, track.album),
+        el('span', { class: 'continue-title' }, track.title),
+        progressBar(episodePercent(track)),
+        el('span', { class: 'continue-left' }, episodeProgress(track))));
+  }
+
+  function showCard(group) {
+    return el('button', {
+      class: 'cover-card',
+      title: group.label,
+      onclick: () => selectPath([{ field: 'album', value: group.value, label: group.label }]),
+      oncontextmenu: (event) => {
+        event.preventDefault();
+        showGroupMenu(event, group.tracks);
+      },
+    },
+      coverTile(group.tracks[0], 'cover-square'),
+      el('span', { class: 'cover-card-title' }, group.label),
+      el('span', { class: 'cover-card-detail' }, plural(group.tracks.length, 'episode')));
+  }
+
+  function renderPodcasts() {
+    if (path.length && path[0].field === 'album') return renderShowPage();
+    if (query || path.length) return renderEpisodeLists();
+    const shows = Library.groups('album', matched, { byName: true });
+    const underWay = matched
+      .filter((t) => UserData.position(t) > 0)
+      .sort((a, b) => UserData.lastPlayed(b) - UserData.lastPlayed(a))
+      .slice(0, CONTINUE_CARDS);
+    return [
+      el('h1', { class: 'heading page-title-only' }, 'Podcasts'),
+      !shows.length ? el('p', { class: 'empty' }, shelf.none) : null,
+      underWay.length ? el('h2', { class: 'shelf-heading' }, 'Continue Listening') : null,
+      underWay.length ? el('div', { class: 'continue-grid' }, ...underWay.map(continueCard)) : null,
+      shows.length ? el('h2', { class: 'shelf-heading' }, 'Shows') : null,
+      shows.length ? el('div', { class: 'cover-grid' }, ...shows.map(showCard)) : null,
+    ].filter(Boolean);
+  }
+
+  // "Mythos — a Retelling of the Myths" is a title and a subtitle.
+  function bookNames(book) {
+    const [title, ...rest] = book.label.split(' — ');
+    return { title, subtitle: rest.join(' — ') };
+  }
+
+  function bookStatus(book) {
+    if (book.left === 0) return 'Finished';
+    return book.left < book.total ? `${formatTotal(book.left)} left` : 'Not started';
+  }
+
+  const bookPercent = (book) => (book.total ? ((book.total - book.left) / book.total) * 100 : 0);
+
+  function chooseHeroBook(books) {
+    const playing = Player.track && books.find((book) => book.value === Player.track.albumKey);
+    return books.find((book) => book.value === heroBook)
+      || playing
+      || books.find((book) => book.left > 0 && book.left < book.total)
+      || books.find((book) => book.left > 0)
+      || books[0];
+  }
+
+  function renderBookHero(book) {
+    const { title, subtitle } = bookNames(book);
+    const { groupArtist, albumYear } = book.tracks[0];
+    const details = [groupArtist, albumYear, book.total ? formatTotal(book.total) : null];
+    const isStarted = book.left < book.total;
+    let state = 'Up Next';
+    if (isStarted) state = book.left ? 'Continue Listening' : 'Finished';
+    let action = 'Start Listening';
+    if (isStarted) action = book.left ? 'Carry On Listening' : 'Listen Again';
+    return el('section', { class: 'book-hero' },
+      coverTile(book.tracks[0], 'cover-book'),
+      el('div', { class: 'hero-text' },
+        el('div', { class: 'book-state' }, state),
+        el('h1', { class: 'heading' }, title),
+        subtitle ? el('p', { class: 'book-subtitle' }, subtitle) : null,
+        el('p', { class: 'book-details' }, details.filter(Boolean).join(' · ')),
+        progressBar(bookPercent(book)),
+        isStarted && book.left ? el('div', { class: 'book-left' }, `${formatTotal(book.left)} left of ${formatTotal(book.total)}`) : null,
+        el('div', { class: 'hero-actions' },
+          el('button', { class: 'hero-action', onclick: () => startList(book.tracks, bookStart(book), { inOrder: true, name: title }) },
+            icon('play'), el('span', { class: 'hero-action-label' }, action)))));
+  }
+
+  function bookCard(book, hero) {
+    const status = bookStatus(book);
+    return el('button', {
+      class: 'cover-card',
+      title: book.label,
+      'aria-pressed': book === hero ? 'true' : 'false',
+      onclick: () => {
+        // A search or list has no book at the top, so go back to the page that does.
+        heroBook = book.value;
+        searchInput.value = '';
+        query = '';
+        flipped.clear();
+        selectPath([]);
+      },
       oncontextmenu: (event) => {
         event.preventDefault();
         showGroupMenu(event, book.tracks);
       },
     },
-      el('span', { class: 'row-title' }, book.label),
-      el('span', { class: 'row-sub' }, progress || groupArtist),
-      el('span', { class: 'row-artist' }, groupArtist),
-      el('span', { class: 'row-year' }, albumYear ? String(albumYear) : ''),
-      el('span', { class: 'row-time' }, book.total ? formatTotal(book.total) : ''),
-      el('span', { class: 'row-progress', 'data-left': progress.endsWith('left') ? 'true' : null }, progress));
+      coverTile(book.tracks[0], 'cover-square'),
+      progressBar(bookPercent(book)) || el('span', { class: 'progress-bar-empty' }),
+      el('span', { class: 'cover-card-title' }, bookNames(book).title),
+      el('span', { class: 'cover-card-detail', 'data-left': status.endsWith('left') ? 'true' : null }, status));
   }
 
-  function renderBooks() {
+  function renderAudiobooks() {
     const tracks = baseTracks();
     visibleTracks = tracks;
     const books = booksIn(tracks);
-    const authors = Library.groups('artist', tracks);
-    const total = books.reduce((sum, book) => sum + book.total, 0);
-
-    let heading = query ? `Results for “${query}”` : 'All Audiobooks';
-    if (path.length) heading = path[path.length - 1].label;
-    const details = [plural(books.length, 'book')];
-    if (authors.length === 1) details.push(authors[0].label);
-    else if (authors.length) details.push(plural(authors.length, 'author'));
-    if (total) details.push(formatTotal(total));
-
-    const rows = el('div', { class: 'rows' });
-    songList = virtualList(scroller, rows, books.length, cssPixels('--row-height'), (i) => bookRow(books[i]));
-    const head = el('div', { class: 'list-head book-columns' },
-      el('span', { class: 'column column-title' }, 'Book'),
-      el('span', { class: 'column' }, 'Author'),
-      el('span', { class: 'column' }, 'Year'),
-      el('span', { class: 'column column-time' }, 'Length'),
-      el('span', { class: 'column' }, 'Progress'));
-
-    const carryOn = books.find((book) => book.left > 0 && book.left < book.total)
-      || books.find((book) => book.left > 0)
-      || books[0];
+    if (!query && !path.length) {
+      if (!books.length) return [el('h1', { class: 'heading page-title-only' }, 'Audiobooks'), el('p', { class: 'empty' }, shelf.none)];
+      const hero = chooseHeroBook(books);
+      return [
+        renderBookHero(hero),
+        el('h2', { class: 'shelf-heading' }, 'All Audiobooks'),
+        el('div', { class: 'cover-grid' }, ...books.map((book) => bookCard(book, hero))),
+      ];
+    }
     return [
-      el('h1', { class: 'heading' }, heading),
-      el('p', { class: 'meta' }, details.join(' · ')),
-      books.length ? el('div', { class: 'page-links' }, el('button', {
-        class: 'page-link',
-        onclick: () => startList(carryOn.tracks, bookStart(carryOn), { inOrder: true }),
-      }, icon('play'), 'Carry On Listening')) : null,
-      books.length ? head : el('p', { class: 'empty' }, emptyMessage()),
-      books.length ? el('div', { class: 'rows-wrap book-columns' }, rows) : null,
-    ].filter(Boolean);
+      el('h1', { class: 'heading' }, path.length ? path[0].label : `Results for “${query}”`),
+      el('p', { class: 'meta' }, plural(books.length, 'book')),
+      books.length
+        ? el('div', { class: 'cover-grid' }, ...books.map((book) => bookCard(book, null)))
+        : el('p', { class: 'empty' }, emptyMessage()),
+    ];
   }
 
   function songRow(track, tracks, index, reorder) {
@@ -840,19 +1060,6 @@ const App = (() => {
   // Quiet links under a page's title for playing whatever it shows.
   function pageLinks(tracks) {
     if (!tracks.length) return null;
-    if (shelf.id === 'podcasts') {
-      const isShow = path.length > 0 && path[0].field === 'album';
-      return el('div', { class: 'page-links' },
-        el('button', {
-          class: 'page-link',
-          onclick: () => {
-            // A show's newest episode is the last in its own order, however it's sorted.
-            const list = isShow ? baseTracks() : visibleTracks;
-            startList(list, isShow ? list.length - 1 : 0, { inOrder: true });
-          },
-        }, icon('play'), isShow ? 'Play Latest' : 'Play'),
-        el('span', { class: 'selection-count' }, selection.size ? `${selection.size.toLocaleString()} selected` : ''));
-    }
     return el('div', { class: 'page-links' },
       el('button', {
         class: 'page-link',
@@ -899,9 +1106,7 @@ const App = (() => {
   function renderSongs() {
     const tracks = sortTracks(baseTracks());
     const total = tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
-    const isPodcasts = shelf.id === 'podcasts';
-    const songWord = isPodcasts ? 'episode' : 'song';
-    const count = plural(tracks.length, query && !path.length ? 'result' : songWord);
+    const count = plural(tracks.length, query && !path.length ? 'result' : 'song');
     visibleTracks = tracks;
 
     let heading = query ? `Results for “${query}”` : 'All Songs';
@@ -911,31 +1116,24 @@ const App = (() => {
       if (path[path.length - 1].field === 'album' && tracks.length) {
         const { groupArtist, albumYear } = tracks[0];
         if (!path.some((step) => step.field === 'artist')) details.push(groupArtist);
-        if (albumYear && !isPodcasts && !path.some((step) => step.field === 'year')) details.push(String(albumYear));
+        if (albumYear && !path.some((step) => step.field === 'year')) details.push(String(albumYear));
       }
     }
     details.push(count);
     if (total) details.push(formatTotal(total));
 
-    const isShow = isPodcasts && path.length > 0 && path[0].field === 'album';
-    const isAlbumPage = !isPodcasts && path.length > 0 && path[path.length - 1].field === 'album' && tracks.length > 0;
+    const isAlbumPage = path.length > 0 && path[path.length - 1].field === 'album' && tracks.length > 0;
     showLastPlayed = isAlbumPage;
     const rowHeight = cssPixels('--row-height');
     const rows = el('div', { class: 'rows' });
     const canReorder = inPlaylist() && UserData.findPlaylist(path[0].value) && !query && !sortColumn;
     const reorder = canReorder ? playlistReorder(tracks, rows, rowHeight) : null;
-    songList = virtualList(scroller, rows, tracks.length, rowHeight, (i) => (isPodcasts
-      ? episodeRow(tracks[i], tracks, i, !isShow)
-      : songRow(tracks[i], tracks, i, reorder)));
+    songList = virtualList(scroller, rows, tracks.length, rowHeight, (i) => songRow(tracks[i], tracks, i, reorder));
 
     let columns = COLUMNS;
-    let columnClass = isAlbumPage ? 'with-last-played' : '';
+    const columnClass = isAlbumPage ? 'with-last-played' : '';
     if (isRecentlyPlayed()) columns = COLUMNS.map((column) => (column.label === 'Genre' ? LAST_PLAYED_COLUMN : column));
     if (isAlbumPage) columns = [...COLUMNS, LAST_PLAYED_COLUMN];
-    if (isPodcasts) {
-      columns = isShow ? EPISODE_COLUMNS : [EPISODE_COLUMNS[0], SHOW_COLUMN, ...EPISODE_COLUMNS.slice(1)];
-      columnClass = isShow ? 'episode-columns' : 'episode-columns-with-show';
-    }
     const head = el('div', { class: `list-head ${columnClass}` }, ...columns.map((column) => {
       const active = sortColumn === column;
       return el('button', {
@@ -944,7 +1142,7 @@ const App = (() => {
         'aria-pressed': active ? 'true' : 'false',
         onclick: () => sortBy(column),
       }, active ? `${column.label} ${sortDescending ? '▼' : '▲'}` : column.label);
-    }), isPodcasts ? null : el('span', { class: 'column column-extra' }));
+    }), el('span', { class: 'column column-extra' }));
 
     return [
       renderCrumbs(),
@@ -1017,10 +1215,11 @@ const App = (() => {
     if (!openMenu) return;
     openMenu.remove();
     openMenu = null;
+    document.querySelectorAll('[aria-expanded="true"]').forEach((button) => button.setAttribute('aria-expanded', 'false'));
   }
 
-  // items: { label, action, checked?, accent? }, { heading } or 'line'.
-  function showMenu(event, items) {
+  // items: { label, action, detail?, checked?, radio?, accent? }, { heading } or 'line'.
+  function showMenu(event, items, { width: fixedWidth, above = false } = {}) {
     closeMenu();
     const menu = el('div', { class: 'menu', role: 'menu' }, ...items.map((item) => {
       if (item === 'line') return el('div', { class: 'menu-line' });
@@ -1028,7 +1227,7 @@ const App = (() => {
       const isToggle = item.checked !== undefined;
       return el('button', {
         class: `menu-item ${item.accent ? 'menu-item-accent' : ''}`,
-        role: isToggle ? 'menuitemcheckbox' : 'menuitem',
+        role: item.radio ? 'menuitemradio' : (isToggle ? 'menuitemcheckbox' : 'menuitem'),
         'aria-checked': isToggle ? String(item.checked) : null,
         onclick: () => {
           closeMenu();
@@ -1036,12 +1235,14 @@ const App = (() => {
         },
       },
         el('span', { class: 'menu-mark' }, item.accent ? icon('plus') : (item.checked ? '✓' : '')),
-        el('span', { class: 'menu-label' }, item.label));
+        el('span', { class: 'menu-label' }, item.label, item.detail ? el('span', { class: 'menu-detail' }, item.detail) : null));
     }));
+    if (fixedWidth) menu.style.width = `${fixedWidth}px`;
     document.body.append(menu);
     const { width, height } = menu.getBoundingClientRect();
     menu.style.left = `${Math.min(event.clientX, window.innerWidth - width - 8)}px`;
-    menu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8))}px`;
+    const top = above ? event.clientY - height : event.clientY;
+    menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
     openMenu = menu;
     menu.querySelector('button').focus();
   }
@@ -1082,6 +1283,7 @@ const App = (() => {
     };
     const items = [
       { label: 'Play Next', action: () => playNext(tracks) },
+      ...editMenuItems(tracks, visibleTracks),
       'line',
       setting('Favourite', UserData.isFavourite, UserData.setFavourite),
       setting('Remember Position', UserData.remembersPosition, UserData.setRemembersPosition),
@@ -1103,7 +1305,7 @@ const App = (() => {
   }
 
   function showGroupMenu(event, tracks) {
-    showMenu(event, [{ label: 'Play Next', action: () => playNext(tracks) }, 'line', ...addToPlaylistItems(tracks)]);
+    showMenu(event, [{ label: 'Play Next', action: () => playNext(tracks) }, ...editMenuItems(tracks), 'line', ...addToPlaylistItems(tracks)]);
   }
 
   function playNext(tracks) {
@@ -1180,6 +1382,459 @@ const App = (() => {
     box.addEventListener('scroll', () => queueList && queueList.draw());
     box.scrollTop = previousTop;
     queueList.draw(true);
+  }
+
+  // ---- Editing tags ----
+
+  function editMenuItems(tracks, stepThrough = null) {
+    if (!Host) return [];
+    return [{ label: tracks.length > 1 ? `Edit ${tracks.length.toLocaleString()} Songs…` : 'Edit Song…', action: () => openEditor(tracks, stepThrough) }];
+  }
+
+  const isMp3 = (track) => /\.mp3$/i.test(track.path);
+
+  function saveProblem(err) {
+    if (/EACCES|EPERM|EROFS/.test(err.message)) return 'the drive can\'t be written to. Check it isn\'t read-only.';
+    if (/ENOSPC/.test(err.message)) return 'the drive is full.';
+    if (/ENOENT/.test(err.message)) return 'the file has gone. Check your drive is plugged in.';
+    return err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+  }
+
+  async function readTagsOf(tracks) {
+    const details = [];
+    for (let i = 0; i < tracks.length; i += EDIT_READS_AT_ONCE) {
+      const batch = tracks.slice(i, i + EDIT_READS_AT_ONCE);
+      details.push(...await Promise.all(batch.map((t) => Host.readTags(t.file.fullPath))));
+    }
+    return details;
+  }
+
+  async function openEditor(chosen, stepThrough = null) {
+    if (driveMissing) {
+      showToast(missingMessage());
+      return;
+    }
+    if (refreshing) {
+      showToast('Checking your folder. Try again in a moment.');
+      return;
+    }
+    const tracks = chosen.filter(isMp3);
+    if (!tracks.length) {
+      showToast('Only MP3 files can be edited so far.');
+      return;
+    }
+    if (tracks.length > MAX_EDIT_SONGS) {
+      showToast(`Edit up to ${MAX_EDIT_SONGS.toLocaleString()} songs at a time.`);
+      return;
+    }
+    let details;
+    try {
+      details = await readTagsOf(tracks);
+    } catch (err) {
+      showToast(`Couldn't read those songs: ${err.message}`);
+      return;
+    }
+    const steps = tracks.length === 1 && stepThrough ? stepThrough.filter(isMp3) : [];
+    showEditor(tracks, details, chosen.length - tracks.length, steps.length > 1 ? steps : null);
+  }
+
+  function showEditor(chosenTracks, firstDetails, skipped, chosenSteps) {
+    // The editor works on its own copies, since it updates them as it saves. The
+    // library's songs must stay as they were so the next check notices the change.
+    const copyOf = new Map([...chosenTracks, ...(chosenSteps || [])].map((t) => [t, { ...t }]));
+    const firstTracks = chosenTracks.map((t) => copyOf.get(t));
+    const stepList = chosenSteps ? chosenSteps.map((t) => copyOf.get(t)) : null;
+    let tracks = firstTracks;
+    let details = firstDetails;
+    const edited = new Set(); // songs saved so far by stepping through them
+    const single = tracks.length === 1;
+    const dirty = new Set(); // boxes that have been changed, such as "album" or "3:title"
+    let strip = false;
+    let cover; // left undefined it stays as it is, null removes it, bytes replace it
+    let coverUrl = null;
+    let saving = false;
+    let undo = null;
+
+    const commonValue = (key) => {
+      const first = details[0][key];
+      return details.every((d) => d[key] === first) ? first : null;
+    };
+
+    const fieldBox = (field, value, dirtyKey, placeholder = '') => {
+      const input = el('input', {
+        class: 'editor-input',
+        value,
+        placeholder,
+        'aria-label': field.label,
+        inputmode: field.numeric ? 'numeric' : null,
+        'data-numeric': field.numeric ? 'true' : null,
+        maxlength: field.numeric ? '6' : null,
+        oninput: () => dirty.add(dirtyKey),
+      });
+      return input;
+    };
+
+    const boxes = new Map();
+    const fieldset = single ? SONG_FIELDS : ALBUM_FIELDS;
+    const grid = el('div', { class: 'editor-grid' }, ...fieldset.map((field) => {
+      const shared = commonValue(field.key);
+      const input = fieldBox(field, shared ?? '', field.key, shared === null ? 'Multiple values' : '');
+      boxes.set(field.key, input);
+      return el('label', { class: 'editor-field', style: `grid-column: span ${field.span}` }, field.label, input);
+    }));
+
+    const compilation = el('input', { type: 'checkbox', onchange: () => dirty.add('compilation') });
+    const sharedCompilation = commonValue('compilation');
+    compilation.checked = sharedCompilation === true;
+    compilation.indeterminate = sharedCompilation === null;
+    grid.append(el('label', { class: 'editor-check' }, compilation, single ? 'Part of a compilation' : 'Compilation by various artists'));
+
+    const rowBoxes = [];
+    const songList = single ? null : el('div', { class: 'editor-rows' }, ...tracks.map((track, i) => {
+      const row = {};
+      const cells = ROW_FIELDS.map((field) => {
+        row[field.key] = fieldBox(field, details[i][field.key], `${i}:${field.key}`, field.label);
+        return row[field.key];
+      });
+      rowBoxes.push(row);
+      return el('div', { class: 'editor-row' }, ...cells);
+    }));
+
+    // ---- The cover ----
+
+    const coverTile = el('div', { class: 'editor-cover' });
+    const coverNote = el('div', { class: 'editor-cover-note' });
+    const sameAlbum = tracks.every((t) => t.albumKey === tracks[0].albumKey);
+
+    function showCover() {
+      coverTile.replaceChildren();
+      coverNote.textContent = '';
+      if (cover) {
+        coverTile.append(el('img', { src: coverUrl, alt: '' }));
+        coverNote.textContent = single ? 'New cover' : `New cover for ${plural(tracks.length, 'song')}`;
+      } else if (cover === null) {
+        coverTile.append('Drop an image here');
+        coverNote.textContent = 'No cover. JPEG or PNG.';
+      } else if (sameAlbum) {
+        coverTile.append('No cover');
+        Covers.forTrack(tracks[0]).then((url) => {
+          if (url && cover === undefined) coverTile.replaceChildren(el('img', { src: url, alt: '' }));
+        });
+      } else {
+        coverTile.append('Songs from different albums');
+        coverNote.textContent = 'Their covers stay as they are unless you choose one.';
+      }
+    }
+
+    function useCover(bytes) {
+      if (coverUrl) URL.revokeObjectURL(coverUrl);
+      cover = bytes;
+      coverUrl = URL.createObjectURL(new Blob([bytes]));
+      showCover();
+    }
+
+    coverTile.addEventListener('dragover', (event) => event.preventDefault());
+    coverTile.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      const [file] = event.dataTransfer.files;
+      if (!file) return;
+      if (!/^image\/(jpeg|png)$/.test(file.type)) {
+        showToast('The cover must be a JPEG or PNG image.');
+        return;
+      }
+      useCover(new Uint8Array(await file.arrayBuffer()));
+    });
+
+    // ---- Strip All Data ----
+
+    const stripButton = el('button', { type: 'button', class: 'editor-strip' }, 'Strip All Data');
+    const warning = el('div', { class: 'editor-warning', role: 'status' });
+    const saveButton = el('button', { class: 'primary', type: 'submit' }, 'Save Changes');
+
+    function showWording() {
+      const files = plural(tracks.length, 'music file');
+      stripButton.textContent = strip ? 'Undo Strip' : 'Strip All Data';
+      stripButton.classList.toggle('editor-strip-on', strip);
+      saveButton.textContent = strip ? 'Strip and Save' : 'Save Changes';
+      if (stepList) {
+        backLabel.textContent = strip ? 'Strip and Back' : 'Back';
+        nextLabel.textContent = strip ? 'Strip and Next' : 'Next';
+      }
+      warning.textContent = strip
+        ? `When you save, every tag and the cover will be removed from ${single ? 'this file' : `these ${files}`}, and only what you enter here gets written. Songs left without a title show their file name.`
+        : `Saving updates ${files} on your drive${skipped ? `, skipping ${plural(skipped, 'song')} that aren't MP3s` : ''}. Boxes you leave alone stay as they are. Play counts, favourites and playlists stay with these songs.${stepList ? ' Back and Next save your changes as you go.' : ''}`;
+    }
+
+    const allBoxes = () => [...boxes.values(), ...rowBoxes.flatMap((row) => Object.values(row))];
+
+    stripButton.addEventListener('click', () => {
+      if (saving) return;
+      strip = !strip;
+      if (strip) {
+        undo = { values: allBoxes().map((box) => box.value), placeholders: allBoxes().map((box) => box.placeholder), checked: compilation.checked, indeterminate: compilation.indeterminate, cover, coverUrl };
+        allBoxes().forEach((box) => { box.value = ''; box.placeholder = box.getAttribute('aria-label'); });
+        compilation.checked = false;
+        compilation.indeterminate = false;
+        cover = null;
+      } else {
+        allBoxes().forEach((box, i) => { box.value = undo.values[i]; box.placeholder = undo.placeholders[i]; });
+        compilation.checked = undo.checked;
+        compilation.indeterminate = undo.indeterminate;
+        ({ cover, coverUrl } = undo);
+      }
+      showCover();
+      showWording();
+    });
+
+    // ---- Saving ----
+
+    function changesFor(index) {
+      const changes = {};
+      const fieldValues = single ? SONG_FIELDS : ALBUM_FIELDS;
+      for (const { key } of fieldValues) {
+        if (strip ? boxes.get(key).value.trim() : dirty.has(key)) changes[key] = boxes.get(key).value.trim();
+      }
+      if (rowBoxes.length) {
+        for (const { key } of ROW_FIELDS) {
+          const box = rowBoxes[index][key];
+          if (strip ? box.value.trim() : dirty.has(`${index}:${key}`)) changes[key] = box.value.trim();
+        }
+      }
+      if (strip ? compilation.checked : dirty.has('compilation')) changes.compilation = compilation.checked;
+      return changes;
+    }
+
+    const progress = el('span', { class: 'editor-progress', role: 'status' });
+    const cancelButton = el('button', { class: 'secondary', type: 'button', onclick: () => finish() }, stepList ? 'Close' : 'Cancel');
+    const backLabel = el('span', {}, 'Back');
+    const nextLabel = el('span', {}, 'Next');
+    const backButton = el('button', { class: 'secondary editor-step', type: 'button', onclick: () => goTo(stepAt - 1) }, icon('back'), backLabel);
+    const nextButton = el('button', { class: 'secondary editor-step editor-step-next', type: 'button', onclick: () => goTo(stepAt + 1) }, nextLabel, icon('back'));
+    const title = el('h2', { class: 'dialog-title' });
+    const dialog = el('dialog', { class: 'dialog editor' });
+    let stepAt = stepList ? stepList.indexOf(firstTracks[0]) : -1;
+
+    function showTitle() {
+      if (stepList) title.textContent = `Edit Song · ${(stepAt + 1).toLocaleString()} of ${stepList.length.toLocaleString()}`;
+      else title.textContent = single ? 'Edit Song' : `Edit ${tracks.length.toLocaleString()} Songs`;
+    }
+
+    function setBusy(busy) {
+      saving = busy;
+      dialog.classList.toggle('editor-saving', busy);
+      saveButton.disabled = busy;
+      cancelButton.disabled = busy;
+      stripButton.disabled = busy;
+      backButton.disabled = busy || stepAt <= 0;
+      nextButton.disabled = busy || (stepList ? stepAt >= stepList.length - 1 : true);
+    }
+
+    // Saves to the files. Returns what failed, or null if something needs fixing first.
+    async function writeChanges() {
+      const bad = allBoxes().find((box) => box.dataset.numeric && !/^\d*$/.test(box.value.trim()));
+      if (bad) {
+        bad.focus();
+        showToast(`${bad.getAttribute('aria-label')} needs to be a number.`);
+        return null;
+      }
+      const requests = tracks.map((_, i) => changesFor(i));
+      const failures = [];
+      if (!strip && cover === undefined && requests.every((r) => !Object.keys(r).length)) return failures;
+
+      setBusy(true);
+      const playingEdited = Player.track && tracks.some((t) => t.path === Player.track.path);
+      const wasPlaying = playingEdited && Player.isPlaying;
+      if (playingEdited) Player.audio.pause();
+
+      const batch = new Set(tracks.map((t) => t.path));
+      for (let i = 0; i < tracks.length; i++) {
+        const track = tracks[i];
+        const showing = `Saving ${(i + 1).toLocaleString()} of ${tracks.length.toLocaleString()}`;
+        progress.textContent = `${showing}…`;
+        try {
+          const request = { changes: requests[i], strip };
+          if (cover !== undefined) request.cover = cover;
+          const stats = await Host.writeTags(track.file.fullPath, request, (fraction) => {
+            progress.textContent = `${showing}: ${Math.round(fraction * 100)}%`;
+          });
+          // A song's history moves as soon as its file has changed.
+          const file = Host.makeFile({ fullPath: track.file.fullPath, name: track.file.name, ...stats });
+          const newKey = await Library.keyFromFile({ file, path: track.path });
+          const otherCopy = Library.tracks.some((t) => t.key === track.key && !batch.has(t.path));
+          UserData.moveSong(track.key, newKey, otherCopy);
+          // Stepping can come back to this song before the library is next updated.
+          track.key = newKey;
+          track.file = file;
+          edited.add(track);
+          if ((i + 1) % EDIT_SAVE_EVERY === 0) UserData.flush();
+        } catch (err) {
+          console.warn(`Could not save ${track.path}`, err);
+          failures.push({ track, message: saveProblem(err) });
+        }
+      }
+      UserData.flush();
+      if (cover !== undefined) Covers.forgetAll();
+      if (playingEdited) Player.reload(wasPlaying);
+      progress.textContent = '';
+      setBusy(false);
+      return failures;
+    }
+
+    function failureMessage(failures, saved) {
+      return `${saved ? `Saved ${plural(saved, 'song')}. ` : ''}Couldn't save ${failures.length === 1 ? `“${failures[0].track.title}”` : plural(failures.length, 'song')}: ${failures[0].message}`;
+    }
+
+    const finish = async () => {
+      if (saving) return;
+      dialog.close();
+      dialog.remove();
+      if (coverUrl) URL.revokeObjectURL(coverUrl);
+      if (stepList && edited.size) {
+        await afterEdits([...edited]);
+        showToast(`Saved ${plural(edited.size, 'song')}.`);
+      }
+    };
+
+    async function save() {
+      const wasStrip = strip;
+      const failures = await writeChanges();
+      if (!failures) return;
+      if (stepList) {
+        if (failures.length) showToast(failureMessage(failures, 0));
+        else finish();
+        return;
+      }
+      if (!edited.size && !failures.length) {
+        finish();
+        return;
+      }
+      finish();
+      await afterEdits(tracks);
+      if (failures.length) showToast(failureMessage(failures, tracks.length - failures.length));
+      else showToast(wasStrip ? `Stripped and saved ${plural(tracks.length, 'song')}.` : `Saved ${plural(tracks.length, 'song')}.`);
+    }
+
+    function fillBoxes() {
+      for (const field of fieldset) {
+        const box = boxes.get(field.key);
+        box.value = details[0][field.key];
+        box.placeholder = '';
+      }
+      compilation.checked = details[0].compilation;
+      compilation.indeterminate = false;
+    }
+
+    // Saves this song, then shows another. A song that fails to save stays on screen.
+    async function goTo(index) {
+      if (saving || index < 0 || index >= stepList.length) return;
+      const failures = await writeChanges();
+      if (!failures) return;
+      if (failures.length) {
+        showToast(failureMessage(failures, 0));
+        return;
+      }
+      setBusy(true);
+      let next;
+      try {
+        next = await Host.readTags(stepList[index].file.fullPath);
+      } catch (err) {
+        setBusy(false);
+        showToast(`Couldn't read “${stepList[index].title}”: ${saveProblem(err)}`);
+        return;
+      }
+      tracks = [stepList[index]];
+      details = [next];
+      stepAt = index;
+      dirty.clear();
+      strip = false;
+      undo = null;
+      cover = undefined;
+      fillBoxes();
+      showTitle();
+      showCover();
+      showWording();
+      setBusy(false);
+      boxes.get('title').focus();
+    }
+
+    const form = el('form', {
+      onsubmit: (event) => {
+        event.preventDefault();
+        save();
+      },
+    },
+      el('div', { class: 'editor-head' },
+        title,
+        stripButton),
+      el('div', { class: 'editor-body' },
+        el('div', { class: 'editor-cover-column' },
+          coverTile,
+          coverNote,
+          el('button', {
+            class: 'secondary editor-cover-button',
+            type: 'button',
+            onclick: async () => {
+              try {
+                const bytes = await Host.pickImage();
+                if (bytes) useCover(bytes);
+              } catch (err) {
+                showToast(saveProblem(err));
+              }
+            },
+          }, 'Choose Image…'),
+          el('button', {
+            class: 'link-button editor-cover-remove',
+            type: 'button',
+            onclick: () => {
+              cover = null;
+              showCover();
+            },
+          }, 'Remove Cover')),
+        grid),
+      songList ? el('div', { class: 'editor-row editor-row-head' }, ...ROW_FIELDS.map((field) => el('span', {}, field.label))) : null,
+      songList,
+      warning,
+      el('div', { class: 'dialog-buttons editor-buttons' },
+        stepList ? el('div', { class: 'editor-steps' }, backButton, nextButton) : null,
+        progress,
+        cancelButton,
+        saveButton));
+
+    dialog.append(form);
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      finish();
+    });
+    document.body.append(dialog);
+    showTitle();
+    showCover();
+    showWording();
+    setBusy(false);
+    dialog.showModal();
+  }
+
+  // Brings the library, the player and the page up to date with what changed.
+  async function afterEdits(tracks) {
+    const wasOn = path;
+    const firstPath = tracks[0].path;
+    clearSelection();
+    Covers.forgetAll();
+    const folder = await Host.savedFolder();
+    if (folder) await refreshLibrary(folder);
+
+    const byPath = new Map(Library.tracks.map((t) => [t.path, t]));
+    const heardPath = listening.track && listening.track.path;
+    Player.relink(byPath);
+    if (heardPath && byPath.has(heardPath)) listening.track = byPath.get(heardPath);
+
+    // Renaming an album shouldn't throw you out of the page you were on.
+    const edited = byPath.get(firstPath);
+    if (edited && wasOn.length && !path.length) {
+      if (shelfFor(edited) !== shelf) setShelf(shelfFor(edited));
+      selectPath([{ field: 'album', value: edited.albumKey, label: edited.album }]);
+    } else {
+      render();
+    }
   }
 
   function showPlaylistMenu(event, entry) {
@@ -1281,14 +1936,469 @@ const App = (() => {
     ];
   }
 
+  function driveName() {
+    const onDrive = /\/media\/[^/]+\/([^/]+)/.exec(savedFolder.path);
+    return onDrive ? onDrive[1] : savedFolder.name;
+  }
+
+  const missingMessage = () => `Your music drive isn't connected. Plug in “${driveName()}” to play this.`;
+
+  function renderDriveNotice() {
+    return el('div', { class: 'notice notice-warning', role: 'status' },
+      el('div', { class: 'notice-text' },
+        el('div', { class: 'notice-title' }, 'Your music drive isn\'t connected'),
+        el('div', { class: 'notice-detail' }, `You can still browse. Songs will play again as soon as “${driveName()}” is back.`)),
+      el('button', {
+        class: 'secondary notice-button',
+        onclick: async () => {
+          await checkFolder();
+          if (driveMissing) showToast(`Still can't find “${driveName()}”. Check it's plugged in.`);
+        },
+      }, 'Try Again'));
+  }
+
+  function showNewMusic() {
+    const found = Library.tracks.find((t) => newMusicPaths.has(t.path));
+    if (found && shelfFor(found) !== shelf) setShelf(shelfFor(found));
+    selectPath([{ field: 'playlist', value: NEW_MUSIC_LIST, label: 'New Music' }]);
+  }
+
+  function renderScanNotice() {
+    const { newSongs, changed, removed } = scanReport;
+    const albums = Library.groups('album', newSongs);
+    const others = [];
+    if (changed) others.push(`${plural(changed, 'song')} changed`);
+    if (removed) others.push(`${plural(removed, 'song')} removed`);
+    const summary = others.join(', ') || 'Nothing changed or removed';
+
+    let detail = `${summary}.`;
+    if (albums.length === 1) detail = `${albums[0].label} by ${albums[0].tracks[0].groupArtist}. ${detail}`;
+    const title = newSongs.length
+      ? `Scan finished: ${plural(albums.length, 'new album')}, ${plural(newSongs.length, 'song')}`
+      : 'Scan finished';
+    return el('div', { class: 'notice', role: 'status' },
+      el('div', { class: 'notice-text' },
+        el('div', { class: 'notice-title' }, title),
+        el('div', { class: 'notice-detail' }, detail)),
+      newSongs.length ? el('button', { class: 'secondary notice-button', onclick: showNewMusic }, 'Show New Music') : null,
+      el('button', {
+        class: 'link-button notice-dismiss',
+        onclick: () => {
+          scanReport = null;
+          renderMain();
+        },
+      }, 'Dismiss'));
+  }
+
+  // ---- The iPod ----
+
+  const formatGb = (bytes) => `${(bytes / 1e9).toFixed(1)} GB`;
+
+  function renderDevices() {
+    const box = $('#devices');
+    box.hidden = !ipod;
+    if (!ipod) return;
+    const ready = ipod.state === 'ready';
+    const name = ready ? (ipod.contents && ipod.contents.name) || ipod.label : 'iPod';
+    box.replaceChildren(
+      el('h2', { class: 'playlists-heading' }, 'Devices'),
+      el('div', { class: `device ${ipodOpen ? 'device-open' : ''}` },
+        el('button', {
+          class: 'device-name',
+          title: name,
+          'aria-current': ipodOpen ? 'true' : 'false',
+          onclick: () => {
+            ipodOpen = true;
+            scroller.scrollTop = 0;
+            clearSelection();
+            renderDevices();
+            renderMain();
+          },
+        }, name),
+        ready ? el('button', {
+          class: 'device-eject',
+          title: 'Eject',
+          'aria-label': `Eject ${name}`,
+          onclick: ejectIpod,
+        }, icon('eject')) : null));
+  }
+
+  async function ejectIpod() {
+    try {
+      await Host.ejectIpod();
+      await checkIpod();
+      showToast('Your iPod is safe to unplug.');
+    } catch (err) {
+      showToast(saveProblem(err));
+    }
+  }
+
+  async function checkIpod() {
+    let found = null;
+    try {
+      found = await Host.ipod();
+    } catch (err) {
+      console.warn('Could not check for an iPod', err);
+    }
+    const stamp = found ? `${found.state}|${found.mount}|${found.lastSynced}|${found.free}` : '';
+    if (stamp === ipodStamp) return;
+    ipodStamp = stamp;
+    ipod = found;
+    if (!ipod) ipodOpen = false;
+    ipodSongs = ipod && ipod.state === 'ready' ? await Host.ipodSongs() : [];
+    renderDevices();
+    if (ipodOpen || !ipod) renderMain();
+  }
+
+  // ---- Syncing the iPod ----
+
+  const matchKey = (album, title) => `${Library.fold(album || '')}\0${Library.fold(title || '')}`;
+  const canSyncTrack = (track) => /\.mp3$/i.test(track.path);
+
+  function untickedGroups() {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(UNTICKED_KEY) || '[]'));
+    } catch {
+      return new Set();
+    }
+  }
+
+  function setUnticked(unticked) {
+    try {
+      localStorage.setItem(UNTICKED_KEY, JSON.stringify([...unticked]));
+    } catch {
+      // Storage can be blocked; the choice just won't be remembered.
+    }
+  }
+
+  // What can go on the iPod: all music together, then each show and book.
+  function syncGroups() {
+    const groups = [];
+    const music = tracksIn('music').filter(canSyncTrack);
+    if (music.length) groups.push({ id: 'music', label: 'Music', word: 'song', tracks: music });
+    for (const { id, word } of [{ id: 'podcasts', word: 'episode' }, { id: 'audiobooks', word: 'file' }]) {
+      for (const group of Library.groups('album', tracksIn(id).filter(canSyncTrack), { byName: true })) {
+        groups.push({ id: `${id}:${group.value}`, label: group.label, word, tracks: group.tracks });
+      }
+    }
+    return groups;
+  }
+
+  // iPods need a disc and both totals to keep an album's songs in track order, so
+  // anything the tags leave out is worked out from the album itself.
+  function numbersFor(tracks) {
+    const albumSizes = new Map();
+    for (const track of tracks) albumSizes.set(track.albumKey, (albumSizes.get(track.albumKey) || 0) + 1);
+    return new Map(tracks.map((track) => {
+      const discNo = track.discNo || 1;
+      return [track, {
+        trackNo: track.trackNo || 0,
+        trackTotal: track.trackTotal || Math.max(albumSizes.get(track.albumKey), track.trackNo || 0),
+        discNo,
+        discTotal: Math.max(track.discTotal || 1, discNo),
+      }];
+    }));
+  }
+
+  // What a sync would do: the iPod ends up holding exactly what's ticked.
+  function planSync() {
+    const unticked = untickedGroups();
+    const groups = syncGroups();
+    const wanted = groups.filter((group) => !unticked.has(group.id)).flatMap((group) => group.tracks);
+    const wantedKeys = new Set(wanted.map((t) => matchKey(t.album, t.title)));
+    const onIpod = new Set(ipodSongs.map((t) => matchKey(t.album, t.title)));
+    const additions = wanted.filter((t) => !onIpod.has(matchKey(t.album, t.title)));
+    const removals = ipodSongs.filter((t) => !wantedKeys.has(matchKey(t.album, t.title)));
+    const numbers = numbersFor(wanted);
+    const songsThere = new Map(ipodSongs.map((t) => [matchKey(t.album, t.title), t]));
+    const updates = wanted.flatMap((track) => {
+      const there = songsThere.get(matchKey(track.album, track.title));
+      if (!there) return [];
+      const want = numbers.get(track);
+      const same = want.trackNo === there.trackNo && want.trackTotal === there.trackTotal
+        && want.discNo === there.discNo && want.discTotal === there.discTotal;
+      return same ? [] : [{ path: there.path, ...want }];
+    });
+    const addBytes = additions.reduce((sum, t) => sum + t.file.size, 0);
+    const skipped = Library.tracks.length - tracksIn('music').filter(canSyncTrack).length
+      - tracksIn('podcasts').filter(canSyncTrack).length - tracksIn('audiobooks').filter(canSyncTrack).length;
+    return { groups, unticked, additions, removals, updates, numbers, addBytes, skipped };
+  }
+
+  const pendingPlays = () => ipodSongs.reduce((sum, t) => sum + Math.max(0, t.plays - UserData.ipodPlaysCounted(t.path)), 0);
+
+  function bringBackPlays() {
+    let brought = 0;
+    for (const song of ipodSongs) {
+      if (song.plays > UserData.ipodPlaysCounted(song.path)) {
+        brought += UserData.addIpodPlays(song.path, Library.keyFor(song), song.plays, song.lastPlayed);
+      }
+    }
+    UserData.flush();
+    return brought;
+  }
+
+  async function startSync() {
+    // The library decides what stays. Without one, a sync would empty the iPod.
+    if (driveMissing || refreshing || scanning || !Library.tracks.length) {
+      showToast(driveMissing ? missingMessage() : 'Your library isn\'t ready. Try again in a moment.');
+      return;
+    }
+    const plan = planSync();
+    if (!plan.additions.length && !plan.removals.length && !plan.updates.length) {
+      const brought = bringBackPlays();
+      showToast(brought ? `Brought back ${plural(brought, 'play')}. Your iPod is already up to date.` : 'Your iPod is already up to date.');
+      renderMain();
+      return;
+    }
+    if (plan.removals.length) {
+      const yes = await askDialog({
+        title: `Remove ${plural(plan.removals.length, 'song')} from your iPod?`,
+        message: `This sync removes ${plural(plan.removals.length, 'song')} and adds ${plural(plan.additions.length, 'song')}, so your iPod matches what's ticked. Removed songs are deleted from the iPod and can't be brought back from it. Your library's own files aren't touched, and your iPod's plays are brought back first.`,
+        confirm: `Remove ${plural(plan.removals.length, 'song')} and Sync`,
+      });
+      if (!yes) return;
+    }
+
+    bringBackPlays();
+    ipodResult = null;
+    ipodSync = { phase: 'preparing' };
+    renderMain();
+    try {
+      const result = await Host.syncIpod({
+        removals: plan.removals.map((t) => t.path),
+        updates: plan.updates,
+        additions: plan.additions.map((t) => ({
+          fullPath: t.file.fullPath,
+          title: t.title,
+          artist: t.artist,
+          albumArtist: t.albumArtist,
+          album: t.album,
+          albumKey: t.albumKey,
+          genre: t.genre,
+          year: t.year,
+          ...plan.numbers.get(t),
+          compilation: t.compilation,
+          duration: t.duration || 0,
+          size: t.file.size,
+        })),
+      }, (progress) => {
+        ipodSync = { ...ipodSync, ...progress };
+        if (ipodOpen) renderMain();
+      });
+      ipodResult = result;
+    } catch (err) {
+      ipodResult = { problem: saveProblem(err) };
+    }
+    ipodSync = null;
+    ipodStamp = '';
+    await checkIpod();
+    renderMain();
+  }
+
+  function renderSyncProgress() {
+    const { phase, done = 0, total = 0, removed } = ipodSync;
+    const titles = {
+      preparing: 'Getting ready…',
+      removed: `Removed ${plural(removed || 0, 'song')}. Saving…`,
+      saving: 'Saving your iPod\'s music list…',
+      copying: `Copying ${done.toLocaleString()} of ${total.toLocaleString()}`,
+    };
+    return [el('div', { class: 'notice sync-progress', role: 'status' },
+      el('div', { class: 'notice-text' },
+        el('div', { class: 'notice-title' }, 'Syncing. Don\'t unplug your iPod.'),
+        el('div', { class: 'notice-detail' }, titles[phase]),
+        progressBar(total ? (done / total) * 100 : 0)),
+      el('button', {
+        class: 'link-button notice-dismiss',
+        onclick: () => {
+          Host.stopIpodSync();
+          showToast('Stopping after this song.');
+        },
+      }, 'Stop After This Song'))];
+  }
+
+  function renderSyncResult() {
+    if (ipodResult.problem) {
+      return el('div', { class: 'notice notice-warning', role: 'status' },
+        el('div', { class: 'notice-text' },
+          el('div', { class: 'notice-title' }, 'The sync didn\'t finish'),
+          el('div', { class: 'notice-detail' }, ipodResult.problem)));
+    }
+    const { added, removed, updated, failures } = ipodResult;
+    const parts = [`Added ${plural(added, 'song')}`, `removed ${plural(removed, 'song')}`];
+    if (updated) parts.push(`updated ${plural(updated, 'song')}`);
+    return el('div', { class: 'notice', role: 'status' },
+      el('div', { class: 'notice-text' },
+        el('div', { class: 'notice-title' }, 'Sync finished'),
+        el('div', { class: 'notice-detail' }, `${parts.join(', ')}. Eject before you unplug it.`),
+        failures.length ? el('div', { class: 'notice-detail' }, `Couldn't copy ${plural(failures.length, 'song')}, starting with “${failures[0].title}”: ${failures[0].message}`) : null));
+  }
+
+  function renderIpodSync() {
+    if (ipodSync) return renderSyncProgress();
+    if (!Library.tracks.length || driveMissing) {
+      return [el('p', { class: 'empty ipod-section' }, driveMissing ? 'Connect your music drive to sync.' : 'Choose a music folder to sync.')];
+    }
+    const plan = planSync();
+    const removedBytes = removalBytes(plan);
+    const freeAfter = ipod.free + removedBytes - plan.addBytes;
+    const fits = freeAfter >= IPOD_SPARE_BYTES;
+    const played = pendingPlays();
+
+    const rows = plan.groups.map((group) => {
+      const bytes = group.tracks.reduce((sum, t) => sum + t.file.size, 0);
+      const box = el('input', {
+        type: 'checkbox',
+        onchange: () => {
+          const unticked = untickedGroups();
+          if (box.checked) unticked.delete(group.id);
+          else unticked.add(group.id);
+          setUnticked(unticked);
+          renderMain();
+        },
+      });
+      box.checked = !plan.unticked.has(group.id);
+      return el('label', { class: 'sync-row' }, box,
+        el('span', { class: 'sync-row-name' }, group.label),
+        el('span', { class: 'sync-row-detail' }, `${plural(group.tracks.length, group.word)} · ${formatGb(bytes)}`));
+    });
+
+    const summary = [
+      ['Add', plan.additions.length ? `${plural(plan.additions.length, 'song')}, ${formatGb(plan.addBytes)}` : 'Nothing'],
+      ['Remove', plan.removals.length ? `${plural(plan.removals.length, 'song')}, ${formatGb(removedBytes)}` : 'Nothing'],
+      ...(plan.updates.length ? [['Update', plural(plan.updates.length, 'song')]] : []),
+      ['Bring back', played ? `${plural(played, 'play')} from your iPod` : 'No new plays'],
+      ['Free after sync', fits ? formatGb(freeAfter) : `Short of ${formatGb(IPOD_SPARE_BYTES - freeAfter)}`],
+    ];
+    const nothingToDo = !plan.additions.length && !plan.removals.length && !plan.updates.length && !played;
+    return [
+      ipodResult ? renderSyncResult() : null,
+      el('div', { class: 'sync-layout' },
+        el('div', { class: 'sync-list' },
+          el('h2', { class: 'shelf-heading' }, 'What Goes on Your iPod'),
+          ...rows,
+          plan.skipped > 0 ? el('p', { class: 'sync-note' }, `${plural(plan.skipped, 'song')} in other formats can't go on an iPod yet, so ${plan.skipped === 1 ? 'it stays' : 'they stay'} off.`) : null),
+        el('div', { class: 'sync-summary' },
+          el('h2', { class: 'shelf-heading' }, 'This Sync'),
+          ...summary.map(([label, value]) => el('div', { class: 'sync-line' }, el('span', { class: 'sync-line-label' }, label), el('span', { class: 'sync-line-value' }, value))),
+          plan.removals.length ? el('p', { class: 'sync-warning' }, `Songs that aren't ticked or in your library get deleted from the iPod. You'll be asked to confirm.`) : null,
+          fits ? null : el('p', { class: 'sync-warning' }, 'Untick something to make room.'),
+          el('button', {
+            class: 'hero-action sync-button',
+            disabled: !fits || nothingToDo ? 'disabled' : null,
+            onclick: startSync,
+          }, el('span', { class: 'hero-action-label' }, nothingToDo ? 'Up to Date' : 'Sync Now')))),
+    ].filter(Boolean);
+  }
+
+  // The database lists each song's size, but only the summary keeps it, so
+  // removals are estimated from what share of the iPod's songs are going.
+  function removalBytes(plan) {
+    if (!plan.removals.length) return 0;
+    const { kinds } = ipod.contents;
+    const songs = kinds.music.songs + kinds.podcasts.songs + kinds.audiobooks.songs;
+    const bytes = kinds.music.bytes + kinds.podcasts.bytes + kinds.audiobooks.bytes;
+    return songs ? (bytes * plan.removals.length) / songs : 0;
+  }
+
+  // Plugged in, but not available as a drive yet.
+  function renderIpodWaiting() {
+    const messages = {
+      ejected: ['Your iPod has been ejected', 'It\'s safe to unplug. To use it here again, unplug it and plug it back in.', null],
+      unmounted: ['Your iPod is plugged in', 'It hasn\'t opened as a drive yet.', 'Open iPod'],
+      starting: ['Your iPod is starting up', 'This can take a few seconds while its disk spins up.', null],
+    };
+    const [title, detail, action] = messages[ipod.state];
+    return [
+      el('h1', { class: 'heading page-title-only' }, 'iPod'),
+      el('div', { class: 'notice' },
+        el('div', { class: 'notice-text' },
+          el('div', { class: 'notice-title' }, title),
+          el('div', { class: 'notice-detail' }, detail)),
+        action ? el('button', {
+          class: 'secondary notice-button',
+          onclick: async () => {
+            try {
+              await Host.mountIpod();
+              await checkIpod();
+            } catch (err) {
+              showToast(saveProblem(err));
+            }
+          },
+        }, action) : null),
+    ];
+  }
+
+  function renderIpodPage() {
+    if (ipod.state !== 'ready') return renderIpodWaiting();
+    const { contents, capacity, free, model } = ipod;
+    const name = (contents && contents.name) || ipod.label;
+    const used = capacity - free;
+    const synced = new Date(ipod.lastSynced).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+    const head = [
+      el('h1', { class: 'heading' }, name),
+      el('p', { class: 'meta' }, [model, `${Math.round(capacity / 1e9)} GB`, `Last changed ${synced}`].join(' · ')),
+    ];
+    if (!contents) {
+      return [...head, el('p', { class: 'empty' }, 'This iPod\'s music list couldn\'t be read. It may be a model the app doesn\'t support yet.')];
+    }
+
+    const parts = [
+      { label: 'Music', word: 'song', count: contents.kinds.music.songs, bytes: contents.kinds.music.bytes, className: 'meter-music' },
+      { label: 'Podcasts', word: 'episode', count: contents.kinds.podcasts.songs, bytes: contents.kinds.podcasts.bytes, className: 'meter-podcasts' },
+      { label: 'Audiobooks', word: 'book', count: contents.kinds.audiobooks.songs, bytes: contents.kinds.audiobooks.bytes, className: 'meter-books' },
+    ];
+    const media = parts.reduce((sum, part) => sum + part.bytes, 0);
+    const other = Math.max(0, used - media);
+    const percent = (bytes) => `width: ${(bytes / capacity) * 100}%`;
+    const hours = Math.round(contents.milliseconds / 3.6e6);
+
+    return [
+      ...head,
+      el('div', { class: 'meter', role: 'img', 'aria-label': `${formatGb(used)} used, ${formatGb(free)} free` },
+        ...parts.map((part) => el('span', { class: part.className, style: percent(part.bytes) })),
+        el('span', { class: 'meter-other', style: percent(other) })),
+      el('div', { class: 'meter-key' },
+        ...parts.map((part) => el('span', { class: 'meter-key-item' }, el('span', { class: `meter-dot ${part.className}` }), `${part.label} ${formatGb(part.bytes)}`)),
+        el('span', { class: 'meter-key-item' }, el('span', { class: 'meter-dot meter-other' }), `Other ${formatGb(other)}`),
+        el('span', { class: 'meter-free' }, `${formatGb(free)} free`)),
+      el('div', { class: 'ipod-grid' },
+        ...parts.map((part) => el('div', { class: 'ipod-card' },
+          el('div', { class: 'ipod-card-number' }, part.count.toLocaleString()),
+          el('div', { class: 'ipod-card-label' }, part.count === 1 ? part.word : `${part.word}s`),
+          el('div', { class: 'ipod-card-detail' }, part.label))),
+        el('div', { class: 'ipod-card' },
+          el('div', { class: 'ipod-card-number' }, hours.toLocaleString()),
+          el('div', { class: 'ipod-card-label' }, hours === 1 ? 'hour' : 'hours'),
+          el('div', { class: 'ipod-card-detail' }, `${contents.plays.toLocaleString()} ${contents.plays === 1 ? 'play' : 'plays'} on the iPod`))),
+      ...renderIpodSync(),
+      el('h2', { class: 'shelf-heading' }, 'Playlists on Your iPod'),
+      contents.playlists.length
+        ? el('ul', { class: 'ipod-playlists' }, ...contents.playlists.map((list) => el('li', { class: 'ipod-playlist' },
+          el('span', {}, list.name),
+          el('span', { class: 'ipod-playlist-count' }, plural(list.songs, 'song')))))
+        : el('p', { class: 'empty' }, 'No playlists.'),
+    ];
+  }
+
   function renderMain() {
     songList = null;
     visibleTracks = [];
+    if (ipodOpen && ipod) {
+      content.replaceChildren(...renderIpodPage());
+      return;
+    }
     if (Library.tracks.length) {
-      const field = shelf.id === 'audiobooks' ? null : nextField();
-      if (shelf.id === 'audiobooks') content.replaceChildren(...renderBooks());
-      else content.replaceChildren(...(field ? renderGroups(field) : renderSongs()));
-      songList.draw(true);
+      if (shelf.id === 'podcasts') content.replaceChildren(...renderPodcasts());
+      else if (shelf.id === 'audiobooks') content.replaceChildren(...renderAudiobooks());
+      else {
+        const field = nextField();
+        content.replaceChildren(...(field ? renderGroups(field) : renderSongs()));
+      }
+      if (scanReport) content.prepend(renderScanNotice());
+      if (driveMissing) content.prepend(renderDriveNotice());
+      if (songList) songList.draw(true);
     } else if (scanning) {
       content.replaceChildren();
     } else {
@@ -1300,13 +2410,9 @@ const App = (() => {
     const started = performance.now();
     const inShelf = tracksIn(shelf.id);
     matched = query ? Library.search(query).filter((t) => shelfFor(t) === shelf) : inShelf;
-    // Podcasts has no page for everything at once, so it opens on the first show.
-    if (shelf.id === 'podcasts' && !query && !path.length && inShelf.length) {
-      const [first] = Library.groups('album', inShelf, { byName: true });
-      path = [{ field: 'album', value: first.value, label: first.label }];
-    }
-    renderShelves();
+    renderShelfSwitch();
     renderSide();
+    renderDevices();
     renderMain();
     lastRender = performance.now();
     lastRenderCost = lastRender - started;
@@ -1333,7 +2439,7 @@ const App = (() => {
 
     scanning = false;
     status.textContent = `${plural(result.total, 'song')} in ${folderName}`;
-    $('#change-folder').hidden = false;
+    $('#manage-library').hidden = false;
     if (!result.total) showToast(`No music files found in ${folderName}.`);
     render();
     return result;
@@ -1369,6 +2475,7 @@ const App = (() => {
   }
 
   async function openHostFolder(folder) {
+    setDriveMissing(false);
     scanning = true;
     render();
     const status = $('#scan-status');
@@ -1394,44 +2501,110 @@ const App = (() => {
     if (!saved || saved.folderPath !== folder.path || !saved.items.length) return false;
     Library.restore(saved.items.map(({ fileInfo, ...item }) => ({ ...item, file: Host.makeFile(fileInfo) })));
     $('#scan-status').textContent = `${plural(saved.items.length, 'song')} in ${folder.name}`;
-    $('#change-folder').hidden = false;
+    $('#manage-library').hidden = false;
     render();
     return true;
   }
 
-  // Checks the folder behind the scenes and only touches the library if songs changed.
-  async function refreshLibrary(folder) {
+  // Checks the folder and only touches the library if songs changed. A song
+  // that's been moved or retagged counts as changed rather than new and removed.
+  async function refreshLibrary(folder, { report = false } = {}) {
+    if (refreshing) return;
+    refreshing = true;
     const status = $('#scan-status');
     const summary = `${plural(Library.tracks.length, 'song')} in ${folder.name}`;
-    status.textContent = `${summary} · checking for changes…`;
+    status.textContent = report ? 'Scanning your folder…' : `${summary} · checking for changes…`;
 
-    const entries = await Host.scan(() => {});
-    const current = await Host.savedFolder();
-    if (!current || current.path !== folder.path) return;
-    if (!current.available) {
-      status.textContent = summary;
+    try {
+      const entries = await Host.scan((count) => {
+        if (report) status.textContent = `Scanning your folder: ${count.toLocaleString()} found`;
+      });
+      const current = await Host.savedFolder();
+      if (!current || current.path !== folder.path) return;
+      // A drive pulled out mid-scan looks like an empty folder, so never believe that.
+      if (!current.available || (!entries.length && Library.tracks.length)) {
+        status.textContent = summary;
+        if (!current.available) setDriveMissing(true);
+        else if (report) showToast(`No music found in ${folder.name}, so your library was left as it is.`);
+        return;
+      }
+
+      const before = Library.tracks;
+      const known = new Map(before.map((t) => [t.path, t.file]));
+      const unchanged = entries.length === known.size && entries.every(({ path: filePath, file }) => {
+        const previous = known.get(filePath);
+        return previous && previous.size === file.size && previous.lastModified === file.lastModified;
+      });
+      if (unchanged) {
+        status.textContent = summary;
+        if (report) showToast('Scan finished: nothing has changed.');
+        return;
+      }
+
+      const result = await Library.ingest(entries, (stats) => {
+        status.textContent = `Updating library: ${stats.done.toLocaleString()} of ${stats.total.toLocaleString()}`;
+      }, { keepCurrent: true });
+      if (result.cancelled) return;
+
+      status.textContent = `${plural(result.total, 'song')} in ${folder.name}`;
+      if (report) {
+        scanReport = describeChanges(before);
+        if (inPlaylist() && path[0].value === NEW_MUSIC_LIST) path = [];
+      }
+      if (!inPlaylist() && !Library.within(path).length) path = [];
+      render();
+      await saveLibrary(folder);
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  function describeChanges(before) {
+    const after = Library.tracks;
+    const oldKeys = new Set(before.map((t) => t.key));
+    const newKeys = new Set(after.map((t) => t.key));
+    const oldFiles = new Map(before.map((t) => [t.path, t.file]));
+    const newSongs = after.filter((t) => !oldKeys.has(t.key));
+    newMusicPaths = new Set(newSongs.map((t) => t.path));
+    const changed = after.filter((t) => {
+      if (!oldKeys.has(t.key)) return false;
+      const previous = oldFiles.get(t.path);
+      return !previous || previous.size !== t.file.size || previous.lastModified !== t.file.lastModified;
+    }).length;
+    return { newSongs, changed, removed: before.filter((t) => !newKeys.has(t.key)).length };
+  }
+
+  async function scanFolder() {
+    if (driveMissing) {
+      showToast(`Can't scan: “${driveName()}” isn't connected.`);
       return;
     }
-
-    const known = new Map(Library.tracks.map((t) => [t.path, t.file]));
-    const unchanged = entries.length === known.size && entries.every(({ path, file }) => {
-      const previous = known.get(path);
-      return previous && previous.size === file.size && previous.lastModified === file.lastModified;
-    });
-    if (unchanged) {
-      status.textContent = summary;
+    if (refreshing) {
+      showToast('Already checking your folder.');
       return;
     }
+    scanReport = null;
+    const folder = await Host.savedFolder();
+    if (folder) await refreshLibrary(folder, { report: true });
+  }
 
-    const result = await Library.ingest(entries, (stats) => {
-      status.textContent = `Updating library: ${stats.done.toLocaleString()} of ${stats.total.toLocaleString()}`;
-    }, { keepCurrent: true });
-    if (result.cancelled) return;
+  function setDriveMissing(missing) {
+    if (missing === driveMissing) return;
+    driveMissing = missing;
+    document.documentElement.classList.toggle('drive-missing', missing);
+    if (missing) Player.audio.pause();
+    else Covers.forgetAll();
+    renderMain();
+  }
 
-    status.textContent = `${plural(result.total, 'song')} in ${folder.name}`;
-    if (!inPlaylist() && !Library.within(path).length) path = [];
-    render();
-    await saveLibrary(folder);
+  // Notices the drive going and coming back, whichever way it happens.
+  async function checkFolder() {
+    if (!savedFolder || refreshing || !Library.tracks.length) return;
+    const folder = await Host.savedFolder();
+    const available = Boolean(folder && folder.available);
+    if (available === !driveMissing) return;
+    setDriveMissing(!available);
+    if (available) await refreshLibrary(folder);
   }
 
   async function pickFolder() {
@@ -1581,6 +2754,7 @@ const App = (() => {
     query = '';
     flipped.clear();
     if (shelf.id === 'audiobooks') {
+      heroBook = Player.track.albumKey;
       selectPath([]);
       return;
     }
@@ -1608,7 +2782,7 @@ const App = (() => {
   function finishedTrack(track) {
     savePosition(track, 0);
     startListening(track);
-    if (shelf.id !== 'music' && songList) renderMain();
+    if (shelf.id !== 'music') renderMain();
   }
 
   function trackListening() {
@@ -1721,7 +2895,6 @@ const App = (() => {
   // ---- Events ----
 
   function wireEvents() {
-    $('#change-folder').addEventListener('click', pickFolder);
     $('#folder-input').addEventListener('change', onFolderInput);
 
     let frame = 0;
@@ -1751,6 +2924,17 @@ const App = (() => {
       toggle.replaceChildren(icon('mini'));
       toggle.addEventListener('click', () => setMiniPlayer(!miniPlayer));
     }
+    // Pressing a button while its menu is open should just close it.
+    const opensMenu = (button, open) => {
+      let wasOpen = false;
+      button.addEventListener('pointerdown', () => { wasOpen = Boolean(openMenu); });
+      button.addEventListener('click', () => {
+        if (!wasOpen) open();
+        wasOpen = false;
+      });
+    };
+    opensMenu($('#shelf-button'), openShelfMenu);
+    opensMenu($('#manage-library'), openManageMenu);
     $('#queue-toggle').addEventListener('click', () => setQueueOpen(!queueOpen));
     Player.on('queuechange', renderQueue);
     $('#now-heart').addEventListener('click', () => {
@@ -1836,6 +3020,14 @@ const App = (() => {
     Player.setHooks({
       skipsShuffle: UserData.skipsShuffle,
       startPositionFor: (track) => (UserData.remembersPosition(track) ? UserData.position(track) : 0),
+      isOffline: () => driveMissing,
+      sourceAvailable: async () => {
+        if (!Host) return true;
+        const folder = await Host.savedFolder();
+        if (folder && folder.available) return true;
+        setDriveMissing(true);
+        return false;
+      },
     });
     Player.on('trackchange', updateNowPlaying);
     Player.on('duration', ({ track, seconds }) => {
@@ -1844,6 +3036,7 @@ const App = (() => {
       const row = content.querySelector(`[data-track="${track.id}"] .row-time`);
       if (row) row.textContent = formatTime(seconds);
     });
+    Player.on('offline', () => showToast(missingMessage()));
     Player.on('unplayable', (track) => showToast(`Skipped “${track.title}”: this browser can't play it.`));
   }
 
@@ -1861,8 +3054,15 @@ const App = (() => {
 
     if (Host) {
       savedFolder = await Host.savedFolder();
-      if (!savedFolder || !savedFolder.available) render();
-      else if (await restoreLibrary(savedFolder)) await refreshLibrary(savedFolder);
+      setInterval(checkFolder, DRIVE_CHECK_MS);
+      setInterval(checkIpod, DRIVE_CHECK_MS);
+      checkIpod();
+      if (!savedFolder) render();
+      else if (!savedFolder.available) {
+        // The saved library can still be browsed until the drive comes back.
+        if (await restoreLibrary(savedFolder)) setDriveMissing(true);
+        else render();
+      } else if (await restoreLibrary(savedFolder)) await refreshLibrary(savedFolder);
       else await openHostFolder(savedFolder);
       return;
     }

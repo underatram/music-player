@@ -44,5 +44,10 @@ const Covers = (() => {
     return image;
   }
 
-  return { forTrack, element };
+  // Covers that failed while a drive was unplugged get another chance when it's back.
+  function forgetAll() {
+    covers.clear();
+  }
+
+  return { forTrack, element, forgetAll };
 })();

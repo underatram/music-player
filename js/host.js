@@ -28,6 +28,21 @@ const Host = window.musicHost ? (() => {
   return {
     savedFolder: musicHost.savedFolder,
     pickFolder: musicHost.pickFolder,
+    ipod: musicHost.ipod,
+    ejectIpod: musicHost.ejectIpod,
+    mountIpod: musicHost.mountIpod,
+    ipodSongs: musicHost.ipodSongs,
+    stopIpodSync: musicHost.stopIpodSync,
+    syncIpod: (request, onProgress) => {
+      musicHost.onIpodProgress(onProgress);
+      return musicHost.syncIpod(request);
+    },
+    readTags: musicHost.readTags,
+    pickImage: musicHost.pickImage,
+    writeTags: (fullPath, request, onProgress) => {
+      musicHost.onWriteProgress(onProgress);
+      return musicHost.writeTags(fullPath, request);
+    },
     setMini: musicHost.setMini,
     setMiniQueue: musicHost.setMiniQueue,
     readData: musicHost.readData,

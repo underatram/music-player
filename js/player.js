@@ -14,6 +14,8 @@ const Player = (() => {
   let failures = 0; // unplayable files in a row
   let skipsShuffle = null; // decides which songs shuffle leaves out
   let startPositionFor = null; // decides where a song starts
+  let isOffline = null; // says the music can't be reached right now
+  let sourceAvailable = null; // checks whether a failed song's folder has gone
   let pendingStart = 0;
   let position = -1; // where the list has got to
   let objectUrl = null;
@@ -23,6 +25,14 @@ const Player = (() => {
 
   function on(event, fn) {
     (listeners[event] = listeners[event] || []).push(fn);
+  }
+
+  // With the music out of reach, nothing moves your place in the list.
+  function blocked() {
+    if (!isOffline || !isOffline()) return false;
+    audio.pause();
+    emit('offline');
+    return true;
   }
 
   function playCurrent() {
@@ -72,6 +82,7 @@ const Player = (() => {
   // Songs waiting in Up Next play first, then the list from the chosen song.
   // inOrder ignores shuffle, for episodes and books.
   function playList(tracks, index = null, { inOrder = false } = {}) {
+    if (blocked()) return;
     source = tracks;
     failures = 0;
     keepOrder = inOrder;
@@ -123,7 +134,9 @@ const Player = (() => {
   }
 
   function advance() {
-    if (upNext.length) {
+    if (blocked()) {
+      return;
+    } else if (upNext.length) {
       playFromUpNext(0);
     } else if (position + 1 < queue.length) {
       load(position + 1);
@@ -136,6 +149,7 @@ const Player = (() => {
   }
 
   function next() {
+    if (blocked()) return;
     failures = 0;
     advance();
   }
@@ -167,6 +181,7 @@ const Player = (() => {
   }
 
   function previous() {
+    if (blocked()) return;
     failures = 0;
     const restart = audio.currentTime > RESTART_THRESHOLD_SECONDS;
     if (fromUpNext && !restart && position >= 0) load(position);
@@ -176,8 +191,14 @@ const Player = (() => {
 
   function toggle() {
     if (!current()) return;
-    if (audio.paused) resume();
-    else audio.pause();
+    if (!audio.paused) audio.pause();
+    else if (blocked()) return;
+    else if (audio.error) {
+      // It failed while the drive was away, so load it again from the same spot.
+      const reached = audio.currentTime;
+      playCurrent();
+      pendingStart = reached;
+    } else resume();
   }
 
   function seek(seconds) {
@@ -199,8 +220,10 @@ const Player = (() => {
     emit('duration', { track: current(), seconds: audio.duration });
     emit('time');
   });
-  audio.addEventListener('error', () => {
+  audio.addEventListener('error', async () => {
     if (!current()) return;
+    // An unplugged drive isn't a bad file, so don't race through the list.
+    if (sourceAvailable && !(await sourceAvailable())) return;
     emit('unplayable', current());
     // Stop if nothing left can play, so repeat can't loop forever.
     failures++;
@@ -218,19 +241,42 @@ const Player = (() => {
     setHooks: (hooks) => {
       skipsShuffle = hooks.skipsShuffle;
       startPositionFor = hooks.startPositionFor;
+      isOffline = hooks.isOffline;
+      sourceAvailable = hooks.sourceAvailable;
     },
     next,
     previous,
     toggle,
     seek,
     setVolume,
+    // After a rescan, swaps in the new copies of the songs it's holding on to.
+    relink: (byPath) => {
+      const swapIn = (t) => byPath.get(t.path) || t;
+      const before = current();
+      source = source.map(swapIn);
+      queue = queue.map(swapIn);
+      upNext = upNext.map(swapIn);
+      if (fromUpNext) fromUpNext = swapIn(fromUpNext);
+      emit('queuechange');
+      if (current() && current() !== before) emit('trackchange', current());
+    },
+    // The file has been rewritten, so its audio has moved within it.
+    reload: (keepPlaying) => {
+      const track = current();
+      if (!track) return;
+      pendingStart = audio.currentTime;
+      audio.src = track.file.mediaUrl || audio.src;
+      if (keepPlaying) resume();
+    },
     get upNext() { return upNext; },
     get laterInList() { return queue.slice(position + 1); },
     jumpToUpNext: (index) => {
+      if (blocked()) return;
       failures = 0;
       playFromUpNext(index);
     },
     jumpInList: (index) => {
+      if (blocked()) return;
       failures = 0;
       load(position + 1 + index);
     },

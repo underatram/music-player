@@ -1,8 +1,8 @@
 // Text too long for its space scrolls back and forth while you hover over its
 // row, or while the row has keyboard focus.
 (() => {
-  const CONTAINERS = '.row, .filter, .playlist, .display';
-  const TEXT = '.row > span, .filter-title, .playlist-label, .now-title, .now-detail';
+  const CONTAINERS = '.row, .filter, .playlist, .display, .cover-card, .continue-card';
+  const TEXT = '.row > span:not(.episode-text):not(.episode-progress), .episode-text > span, .filter-title, .playlist-label, .now-title, .now-detail, .continue-show, .continue-title';
   const PIXELS_PER_SECOND = 45;
   const MIN_SECONDS = 2;
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');

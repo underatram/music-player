@@ -3,11 +3,11 @@ const Library = (() => {
   const AUDIO_EXTENSIONS = /\.(mp3|flac|ogg|oga|opus|m4a|aac|wav)$/i;
   const CONCURRENT_READS = 8;
   const UPDATE_INTERVAL_MS = 200;
-  const CACHE_VERSION = 'v2';
+  const CACHE_VERSION = 'v3';
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
   const META_FIELDS = [
-    'title', 'artist', 'albumArtist', 'album', 'genre', 'trackNo', 'discNo', 'year', 'compilation', 'duration',
+    'title', 'artist', 'albumArtist', 'album', 'genre', 'trackNo', 'trackTotal', 'discNo', 'discTotal', 'year', 'compilation', 'duration',
   ];
 
   let tracks = [];
@@ -60,7 +60,9 @@ const Library = (() => {
       album: tags.album || fallback.album,
       genre: tags.genre || fallback.genre,
       trackNo: tags.trackNo || fallback.trackNo,
+      trackTotal: tags.trackTotal || null,
       discNo: tags.discNo || null,
+      discTotal: tags.discTotal || null,
       year: tags.year || fallback.year,
       compilation: Boolean(tags.compilation),
       duration: tags.duration || null,
@@ -69,6 +71,9 @@ const Library = (() => {
     if (readOk) await DB.put('tags', cacheKey, meta);
     return { meta, cacheKey, fromCache: false };
   }
+
+  // What favourites, play counts and playlists know a song by.
+  const keyFor = (meta) => fold(`${meta.artist}\0${meta.album}\0${meta.discNo || 1}\0${meta.trackNo || 0}\0${meta.title}`);
 
   function makeTrack(entry, meta, cacheKey, id = nextId++) {
     const groupArtist = meta.albumArtist || (meta.compilation ? 'Various Artists' : meta.artist);
@@ -81,7 +86,7 @@ const Library = (() => {
       cacheKey,
       groupArtist,
       artistKey,
-      key: fold(`${meta.artist}\0${meta.album}\0${meta.discNo || 1}\0${meta.trackNo || 0}\0${meta.title}`),
+      key: keyFor(meta),
       artistSort: sortName(meta.artist),
       groupSort: sortName(groupArtist),
       albumKey: `${artistKey}\0${fold(meta.album)}`,
@@ -221,6 +226,12 @@ const Library = (() => {
     return getIndex().tracks.filter((t) => terms.every((term) => t.searchText.includes(term)));
   }
 
+  // The key a file's tags give it now, for after it has been edited.
+  async function keyFromFile(entry) {
+    const { meta } = await readMeta(entry);
+    return keyFor(meta);
+  }
+
   function setDuration(track, seconds) {
     if (!Number.isFinite(seconds) || track.duration === seconds) return;
     track.duration = seconds;
@@ -234,6 +245,9 @@ const Library = (() => {
     exportTracks,
     restore,
     search,
+    keyFromFile,
+    keyFor,
+    fold,
     setDuration,
     isAudio,
     compareText: (a, b) => collator.compare(a, b),
