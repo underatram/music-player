@@ -1,6 +1,7 @@
 // Album covers, read from the music files only when something needs to show one.
 const Covers = (() => {
   const CONCURRENT_READS = 4;
+  const MAX_KEPT_COVERS = 200;
 
   const covers = new Map(); // album key -> Promise<object URL or null>
   const waiting = [];
@@ -20,14 +21,32 @@ const Covers = (() => {
     }
   }
 
+  function release(promise) {
+    promise.then((url) => {
+      if (url) URL.revokeObjectURL(url);
+    });
+  }
+
+  // Keeps the most recently used covers. Pictures already on screen aren't
+  // affected when their address is released; they've been loaded.
   function forTrack(track) {
-    if (!covers.has(track.albumKey)) {
-      covers.set(track.albumKey, new Promise((resolve) => {
-        waiting.push({ track, resolve });
-        pump();
-      }));
+    const known = covers.get(track.albumKey);
+    if (known) {
+      covers.delete(track.albumKey);
+      covers.set(track.albumKey, known);
+      return known;
     }
-    return covers.get(track.albumKey);
+    const cover = new Promise((resolve) => {
+      waiting.push({ track, resolve });
+      pump();
+    });
+    covers.set(track.albumKey, cover);
+    if (covers.size > MAX_KEPT_COVERS) {
+      const [oldestKey, oldest] = covers.entries().next().value;
+      covers.delete(oldestKey);
+      release(oldest);
+    }
+    return cover;
   }
 
   // An element that shows the cover once it has loaded, and stays hidden if there isn't one.
@@ -46,6 +65,7 @@ const Covers = (() => {
 
   // Covers that failed while a drive was unplugged get another chance when it's back.
   function forgetAll() {
+    covers.forEach(release);
     covers.clear();
   }
 

@@ -1,7 +1,7 @@
 {
   "name": "music-player",
   "productName": "Music",
-  "version": "0.17.0",
+  "version": "0.18.1",
   "description": "A music player for your local library",
   "homepage": "https://github.com/underatram/music-player",
   "repository": {
@@ -17,11 +17,17 @@
   },
   "scripts": {
     "start": "electron .",
+    "test": "node --test tests/*.test.js",
+    "test:app": "node --test tests/app/*.test.js",
     "helper": "gcc -O2 native/ipod-helper.c -o native/ipod-helper $(pkg-config --cflags --libs libgpod-1.0)",
     "dist": "npm run helper && electron-builder --linux deb"
   },
   "build": {
     "appId": "io.github.underatram.music",
+    "electronLanguages": [
+      "en-GB",
+      "en-US"
+    ],
     "files": [
       "index.html",
       "style.css",

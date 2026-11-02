@@ -80,6 +80,8 @@ npm install
 npm start
 ```
 
+To run the tests, use `npm test`, and `npm run test:app` for the slower ones that drive the real app and open a window. They only use made-up music and a fake iPod. Tests of the iPod parts need `gcc`, `pkg-config` and `libgpod-dev`, and skip themselves without them.
+
 To build the installer, you'll also need `gcc`, `pkg-config` and `libgpod-dev`. Then run `npm run dist`. It's saved in the `dist` folder.
 
 The app is plain HTML, CSS and JavaScript with no build step, wrapped in [Electron](https://www.electronjs.org).

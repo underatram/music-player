@@ -3,7 +3,8 @@ const Library = (() => {
   const AUDIO_EXTENSIONS = /\.(mp3|flac|ogg|oga|opus|m4a|aac|wav)$/i;
   const CONCURRENT_READS = 8;
   const UPDATE_INTERVAL_MS = 200;
-  const CACHE_VERSION = 'v3';
+  const CACHE_VERSION = 'v4';
+  const OLD_CACHE_VERSION = 'v3';
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
   const META_FIELDS = [
@@ -40,9 +41,14 @@ const Library = (() => {
 
   async function readMeta(entry) {
     const { file, path } = entry;
-    const cacheKey = `${CACHE_VERSION}|${path}|${file.size}|${file.lastModified}`;
-    const cached = await DB.get('tags', cacheKey);
-    if (cached) return { meta: cached, cacheKey, fromCache: true };
+    // A file keeps its name, size and date when it's moved, so its tags needn't be
+    // read again. Details guessed from the folder do depend on where it is.
+    const movableKey = `${CACHE_VERSION}|${file.name}|${file.size}|${file.lastModified}`;
+    const placedKey = `${CACHE_VERSION}|${path}|${file.size}|${file.lastModified}`;
+    for (const key of [movableKey, placedKey, `${OLD_CACHE_VERSION}|${path}|${file.size}|${file.lastModified}`]) {
+      const cached = await DB.get('tags', key);
+      if (cached) return { meta: cached, cacheKey: key, fromCache: true };
+    }
 
     let tags = {};
     let readOk = true;
@@ -67,6 +73,8 @@ const Library = (() => {
       compilation: Boolean(tags.compilation),
       duration: tags.duration || null,
     };
+    const usedFolder = !tags.title || !tags.artist || !tags.album || !tags.genre || !tags.trackNo || !tags.year;
+    const cacheKey = usedFolder ? placedKey : movableKey;
     // A failed read might just mean a drive was unplugged, so try again next time.
     if (readOk) await DB.put('tags', cacheKey, meta);
     return { meta, cacheKey, fromCache: false };

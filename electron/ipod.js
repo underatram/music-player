@@ -378,4 +378,4 @@ function mount() {
   });
 }
 
-module.exports = { describe, eject, mount, parseDatabase, songs, sync, stopSync };
+module.exports = { addPlayCounts, describe, eject, mount, parseDatabase, songs, sync, stopSync };

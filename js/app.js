@@ -2052,7 +2052,6 @@ const App = (() => {
 
   // ---- Syncing the iPod ----
 
-  const matchKey = (album, title) => `${Library.fold(album || '')}\0${Library.fold(title || '')}`;
   const canSyncTrack = (track) => /\.mp3$/i.test(track.path);
 
   function untickedGroups() {
@@ -2084,45 +2083,16 @@ const App = (() => {
     return groups;
   }
 
-  // iPods need a disc and both totals to keep an album's songs in track order, so
-  // anything the tags leave out is worked out from the album itself.
-  function numbersFor(tracks) {
-    const albumSizes = new Map();
-    for (const track of tracks) albumSizes.set(track.albumKey, (albumSizes.get(track.albumKey) || 0) + 1);
-    return new Map(tracks.map((track) => {
-      const discNo = track.discNo || 1;
-      return [track, {
-        trackNo: track.trackNo || 0,
-        trackTotal: track.trackTotal || Math.max(albumSizes.get(track.albumKey), track.trackNo || 0),
-        discNo,
-        discTotal: Math.max(track.discTotal || 1, discNo),
-      }];
-    }));
-  }
-
   // What a sync would do: the iPod ends up holding exactly what's ticked.
   function planSync() {
     const unticked = untickedGroups();
     const groups = syncGroups();
     const wanted = groups.filter((group) => !unticked.has(group.id)).flatMap((group) => group.tracks);
-    const wantedKeys = new Set(wanted.map((t) => matchKey(t.album, t.title)));
-    const onIpod = new Set(ipodSongs.map((t) => matchKey(t.album, t.title)));
-    const additions = wanted.filter((t) => !onIpod.has(matchKey(t.album, t.title)));
-    const removals = ipodSongs.filter((t) => !wantedKeys.has(matchKey(t.album, t.title)));
-    const numbers = numbersFor(wanted);
-    const songsThere = new Map(ipodSongs.map((t) => [matchKey(t.album, t.title), t]));
-    const updates = wanted.flatMap((track) => {
-      const there = songsThere.get(matchKey(track.album, track.title));
-      if (!there) return [];
-      const want = numbers.get(track);
-      const same = want.trackNo === there.trackNo && want.trackTotal === there.trackTotal
-        && want.discNo === there.discNo && want.discTotal === there.discTotal;
-      return same ? [] : [{ path: there.path, ...want }];
-    });
-    const addBytes = additions.reduce((sum, t) => sum + t.file.size, 0);
+    const plan = IpodPlan.compute({ wanted, ipodSongs, fold: Library.fold });
+    const addBytes = plan.additions.reduce((sum, t) => sum + t.file.size, 0);
     const skipped = Library.tracks.length - tracksIn('music').filter(canSyncTrack).length
       - tracksIn('podcasts').filter(canSyncTrack).length - tracksIn('audiobooks').filter(canSyncTrack).length;
-    return { groups, unticked, additions, removals, updates, numbers, addBytes, skipped };
+    return { ...plan, groups, unticked, addBytes, skipped };
   }
 
   const pendingPlays = () => ipodSongs.reduce((sum, t) => sum + Math.max(0, t.plays - UserData.ipodPlaysCounted(t.path)), 0);
@@ -2139,8 +2109,7 @@ const App = (() => {
   }
 
   async function startSync() {
-    // The library decides what stays. Without one, a sync would empty the iPod.
-    if (driveMissing || refreshing || scanning || !Library.tracks.length) {
+    if (!IpodPlan.canSync({ driveMissing, refreshing, scanning, songCount: Library.tracks.length })) {
       showToast(driveMissing ? missingMessage() : 'Your library isn\'t ready. Try again in a moment.');
       return;
     }

@@ -749,7 +749,8 @@ button:disabled { cursor: default; }
 .marquee { text-overflow: clip !important; }
 .marquee-text {
   display: inline-block;
-  animation: marquee var(--marquee-seconds) ease-in-out 0.6s infinite alternate;
+  /* An even count ends with the text back at its start. */
+  animation: marquee var(--marquee-seconds) ease-in-out 0.6s 6 alternate;
 }
 @keyframes marquee {
   0%, 12% { transform: translateX(0); }
