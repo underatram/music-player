@@ -289,6 +289,7 @@ const Player = (() => {
       emit('queuechange');
     },
     get track() { return current(); },
+    // Where the playing song sits in the list, counting from 1.
     get isPlaying() { return !audio.paused; },
   };
 })();

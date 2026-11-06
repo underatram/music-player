@@ -3,6 +3,7 @@
 // than their path, so moving a file doesn't lose its data.
 const UserData = (() => {
   const SAVE_DELAY_MS = 1000;
+  const MOST_PLAYED_SIZE = 25;
   // Long listens default to remembering their place and staying out of shuffle.
   const LONG_LISTEN_GENRES = new Set(['podcast', 'audiobook']);
 
@@ -93,6 +94,18 @@ const UserData = (() => {
     return fresh;
   }
 
+  // The top songs. Songs level on plays go by which was played most recently, so
+  // who makes the cut doesn't depend on the order of the library.
+  const mostPlayed = (tracks) => tracks
+    .filter((track) => (song(track).plays || 0) > 0)
+    .sort((a, b) => song(b).plays - song(a).plays || (song(b).lastPlayed || 0) - (song(a).lastPlayed || 0))
+    .slice(0, MOST_PLAYED_SIZE);
+
+  function setIpodPlaylists(names) {
+    data.ipodPlaylists = names;
+    save();
+  }
+
   const ipodPlaysCounted = (ipodPath) => (data.ipodPlays && data.ipodPlays[ipodPath]) || 0;
 
   const isLongListen = (track) => LONG_LISTEN_GENRES.has(track.genreKey);
@@ -154,11 +167,14 @@ const UserData = (() => {
     flush,
     moveSong,
     addIpodPlays,
+    setIpodPlaylists,
+    get ipodPlaylists() { return data.ipodPlaylists || []; },
     ipodPlaysCounted,
     isFavourite: (track) => Boolean(song(track).favourite),
     toggleFavourite: (track) => update(track, { favourite: !song(track).favourite }),
     setFavourite: (track, on) => update(track, { favourite: on }),
     plays: (track) => song(track).plays || 0,
+    mostPlayed,
     countPlay: (track) => update(track, { plays: (song(track).plays || 0) + 1, lastPlayed: Date.now() }),
     lastPlayed: (track) => song(track).lastPlayed || 0,
     position: (track) => song(track).position || 0,

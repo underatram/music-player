@@ -172,6 +172,47 @@ test('Strip All Data empties the boxes, and Undo brings them back', { skip }, as
   assert(!bytes.includes('image/png'));
 });
 
+test('bulk editing sets the artist and track count for every song, row by row is just number and title', { skip }, async () => {
+  const file = path.join(music, 'Violet Hours/Afterglow/02 Soft Focus.mp3');
+  const before = await readDetails(file);
+  const bulk = (artist, total) => `document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'a',ctrlKey:true,bubbles:true}));await w(150);
+    await editRow($('.row[data-track]'));
+    const r={artist:field('Artist').value,rowBoxes:[...$$('.editor-rows .editor-row')[0].querySelectorAll('input')].map(b=>b.getAttribute('aria-label'))};
+    type(field('Artist'),'${artist}');type(field('Tracks in Album'),'${total}');
+    await save();return r`;
+  const seen = await page(bulk('Someone Else', '9'));
+  assert.strictEqual(seen.artist, 'Violet Hours');
+  assert.deepStrictEqual(seen.rowBoxes, ['Track', 'Title']);
+  const changed = await readDetails(file);
+  assert.deepStrictEqual([changed.artist, changed.trackTotal, changed.title, changed.track], ['Someone Else', '9', before.title, before.track]);
+  await page(bulk('Violet Hours', before.trackTotal));
+  const restored = await readDetails(file);
+  assert.deepStrictEqual([restored.artist, restored.trackTotal], ['Violet Hours', before.trackTotal]);
+});
+
+test('going song by song shows the number and title, with the rest a click away', { skip }, async () => {
+  const seen = await page(`await editRow($$('.row[data-track]')[1]);
+    const shown=(l)=>field(l).checkVisibility();
+    const r={track:shown('Track'),title:shown('Title'),artist:shown('Artist'),cover:$('.editor-cover').checkVisibility(),first:$('.editor-field input').getAttribute('aria-label')};
+    $('.editor-more summary').click();await w(100);
+    r.artistAfter=shown('Artist');r.coverAfter=$('.editor-cover').checkVisibility();
+    [...$$('.editor-buttons button')].find(b=>b.textContent==='Close').click();await until(()=>!$('.editor'));
+    return r`);
+  assert.deepStrictEqual(seen, { track: true, title: true, artist: false, cover: false, first: 'Track', artistAfter: true, coverAfter: true });
+});
+
+test('album pages number their songs', { skip }, async () => {
+  const seen = await page(`const rows=$$('.row[data-track]');
+    const r={head:$('.list-head .column').textContent,numbers:rows.map(x=>x.querySelector('.row-track').textContent)};
+    $('.list-head .column').click();await w(200);$('.list-head .column').click();await w(200);
+    r.reversed=$$('.row[data-track] .row-track').map(x=>x.textContent);
+    $('.list-head .column').click();await w(200);
+    return r`);
+  assert.strictEqual(seen.head, '#');
+  assert.deepStrictEqual(seen.numbers, ['1', '2'], 'Strip All Data took the third song off this album');
+  assert.deepStrictEqual(seen.reversed, ['2', '1']);
+});
+
 test('a song being played keeps playing through an edit', { skip }, async () => {
   const seen = await page(`Player.audio.muted=true;await openAlbum('Harbour Lights');
     Player.playList(Library.tracks.filter(x=>x.album==='Harbour Lights'),0);await until(()=>Player.isPlaying);
@@ -253,8 +294,46 @@ test('unticking something removes only that from the iPod', { skip }, async () =
   assert(!tracks.some((t) => t.title === 'Episode'));
 });
 
+test('playlists go across in order, and follow renames and deletions', { skip }, async () => {
+  const titlesOf = (name) => {
+    const { lists, tracks } = ipodDatabase();
+    const found = lists.find((l) => l.name === name);
+    return found && found.paths.map((p) => tracks.find((t) => t.path === p).title);
+  };
+  const sync = (expected) => page(`$('.device-name').click();await w(300);$('.sync-button').click();
+    await until(()=>$$('.notice').some(n=>/${expected}/.test(n.innerText)),30000);await w(500);
+    return lines()`);
+
+  await page(`const list=UserData.playlists.find(p=>p.name==='Trip');
+    UserData.addToPlaylist(list.id,Library.tracks.filter(t=>t.title==='Soft Focus'||t.title==='Low Tide 2'));
+    UserData.setPlaylistOrder(list.id,list.songs.map(Library.byKey).filter(Boolean).reverse())`);
+  await sync('changed 1 playlist');
+  const sent = titlesOf('Trip');
+  assert(sent && sent.length >= 1, 'the playlist isn\'t on the iPod');
+  const inApp = await page(`return UserData.playlists.find(p=>p.name==='Trip').songs.map(k=>Library.byKey(k)).filter(Boolean).filter(t=>/\\.mp3$/i.test(t.path)).map(t=>t.title)`);
+  assert.deepStrictEqual(sent, inApp, 'order differs');
+
+  const again = await page(`$('.device-name').click();await w(300);return {lines:lines(),button:$('.sync-button').textContent}`);
+  assert.strictEqual(again.button, 'Up to Date', 'an unchanged playlist shouldn\'t need sending again');
+
+  await page(`const list=UserData.playlists.find(p=>p.name==='Trip');UserData.renamePlaylist(list.id,'Road Trip')`);
+  await sync('changed 2 playlists');
+  assert.strictEqual(titlesOf('Trip'), undefined, 'the old name stayed');
+  assert.deepStrictEqual(titlesOf('Road Trip'), inApp);
+
+  const smartBefore = ipodDatabase().lists.filter((l) => l.smart).length;
+  assert.strictEqual(smartBefore, 1, 'the fake iPod should have a smart playlist');
+  const songsBefore = ipodDatabase().tracks.length;
+  await page(`const list=UserData.playlists.find(p=>p.name==='Road Trip');UserData.deletePlaylist(list.id)`);
+  await sync('changed 1 playlist');
+  assert.strictEqual(titlesOf('Road Trip'), undefined);
+  assert.strictEqual(ipodDatabase().tracks.length, songsBefore, 'deleting a playlist must not remove songs');
+  assert.strictEqual(ipodDatabase().lists.filter((l) => l.smart).length, smartBefore);
+});
+
 test('with the music drive gone, the iPod can\'t be synced', { skip }, async () => {
   const hidden = `${music}-gone`;
+  const songsBefore = ipodDatabase().tracks.length;
   fs.renameSync(music, hidden);
   try {
     const seen = await page(`await until(()=>document.documentElement.classList.contains('drive-missing'),8000);
@@ -262,7 +341,7 @@ test('with the music drive gone, the iPod can\'t be synced', { skip }, async () 
       return {button:Boolean($('.sync-button')),text:$('.ipod-section')&&$('.ipod-section').textContent}`);
     assert.strictEqual(seen.button, false);
     assert.match(seen.text, /Connect your music drive/);
-    assert.strictEqual(ipodDatabase().tracks.length, 5);
+    assert.strictEqual(ipodDatabase().tracks.length, songsBefore);
   } finally {
     fs.renameSync(hidden, music);
   }
@@ -273,6 +352,62 @@ test('play counts and the iPod ledger survive a restart', { skip }, async () => 
   await page('UserData.flush()');
   await stopApp();
   await startApp();
-  const seen = await page(`const t=Library.tracks.find(x=>x.title==='First Light 2'||x.title==='Stepped');return {favourite:UserData.isFavourite(t),plays:UserData.plays(t),title:t.title,inList:UserData.playlists[0].songs.includes(t.key)}`);
-  assert.deepStrictEqual([seen.favourite, seen.plays, seen.inList], [true, 1, true], seen.title);
+  const seen = await page(`const t=Library.tracks.find(x=>x.title==='First Light 2'||x.title==='Stepped');return {favourite:UserData.isFavourite(t),plays:UserData.plays(t),title:t.title,remembered:UserData.ipodPlaylists.length}`);
+  assert.deepStrictEqual([seen.favourite, seen.plays, seen.remembered], [true, 1, 0], seen.title);
+});
+
+test('an album with two discs has a heading for each, and one that stays in view', { skip }, async () => {
+  for (const disc of [1, 2]) {
+    for (let i = 1; i <= 20; i++) {
+      addSong(`Big Band/Box Set/Disc ${disc}`, `${String(i).padStart(2, '0')} S${disc}-${i}.mp3`, { title: `S${disc}-${i}`, artist: 'Big Band', album: 'Box Set', track: String(i), frames: 100, extra: [['TPOS', A.utf16(`${disc}/2`)]] });
+    }
+  }
+  const seen = await page(`Player.audio.muted=true;
+    $('#manage-library').click();await w(100);$$('.menu-item').find(b=>b.textContent.includes('Scan')).click();await until(()=>Library.tracks.some(t=>t.title==='S2-20'));await w(300);
+    await openAlbum('Box Set');
+    const box=$('#scroller');
+    const stuck=()=>{const s=$('.disc-sticky');return s.hidden?null:s.querySelector('h2').textContent};
+    const r={meta:$('.meta').textContent,top:stuck(),first:$('.rows .disc-head h2').textContent,detail:$('.rows .disc-head .disc-detail').textContent};
+    const rowH=$('.row[data-track]').offsetHeight;
+    box.scrollTop=$('.rows').offsetTop+rowH*8;await until(()=>stuck()==='Disc 1',3000).catch(()=>{});r.inOne=stuck();
+    box.scrollTop=box.scrollHeight;await until(()=>stuck()==='Disc 2',3000).catch(()=>{});r.inTwo=stuck();
+    const lastRow=()=>$$('.row[data-track]').find(x=>x.querySelector('.row-title').textContent==='S2-20');
+    await until(lastRow,5000);
+    r.lastNumber=$$('.row[data-track] .row-track').pop().textContent;
+    lastRow().click();await w(300);
+    r.clicked=Player.track.title;
+    $('.disc-sticky .page-link').click();await w(300);
+    r.played=Player.track.title;
+    Player.audio.pause();
+    box.scrollTop=0;await w(100);
+    $$('.list-head .column').find(c=>c.textContent==='Title').click();await w(200);
+    r.sortedHeads=$$('.disc-head').length;r.sortedMeta=$('.meta').textContent;
+    await openAlbum('Harbour Lights');
+    r.singleHeads=$$('.disc-head').length;r.singleMeta=$('.meta').textContent;
+    await openAlbum('Box Set');
+    r.reopenedHeads=$$('.rows .disc-head').length>0;r.reopenedSort=$$('.list-head .column').some(c=>/[▲▼]/.test(c.textContent));
+    return r`);
+  assert.match(seen.meta, /2 discs · 40 songs/);
+  assert.strictEqual(seen.top, null, 'nothing floats until the first heading has scrolled away');
+  assert.strictEqual(seen.first, 'Disc 1');
+  assert.match(seen.detail, /^20 songs/);
+  assert.strictEqual(seen.inOne, 'Disc 1');
+  assert.strictEqual(seen.inTwo, 'Disc 2');
+  assert.strictEqual(seen.lastNumber, '20');
+  assert.strictEqual(seen.clicked, 'S2-20', 'a click plays the song under it, despite the headings');
+  assert.strictEqual(seen.played, 'S2-1');
+  assert.strictEqual(seen.sortedHeads, 0);
+  assert.doesNotMatch(seen.sortedMeta, /disc/);
+  assert.strictEqual(seen.singleHeads, 0);
+  assert.doesNotMatch(seen.singleMeta, /disc/);
+  assert.strictEqual(seen.reopenedHeads, true, 'a sort on one album must not hide the next album\'s headings');
+  assert.strictEqual(seen.reopenedSort, false);
+});
+
+test('the play bar has its own window buttons, and maximise toggles', { skip }, async () => {
+  const seen = await page(`const max=$('.window-maximise');const r={shown:!$('.window-controls').hidden,count:$$('.window-button').length};
+    max.click();await until(()=>max.getAttribute('aria-label')==='Restore',5000).catch(()=>{});r.after=max.getAttribute('aria-label');
+    max.click();await until(()=>max.getAttribute('aria-label')==='Maximise',5000).catch(()=>{});r.back=max.getAttribute('aria-label');
+    return r`);
+  assert.deepStrictEqual(seen, { shown: true, count: 3, after: 'Restore', back: 'Maximise' });
 });

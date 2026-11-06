@@ -44,6 +44,8 @@ const Host = window.musicHost ? (() => {
       return musicHost.writeTags(fullPath, request);
     },
     setMini: musicHost.setMini,
+    windowControl: musicHost.windowControl,
+    onMaximised: musicHost.onMaximised,
     setMiniQueue: musicHost.setMiniQueue,
     readData: musicHost.readData,
     writeData: musicHost.writeData,

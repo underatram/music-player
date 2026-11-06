@@ -113,3 +113,44 @@ test('podcasts and audiobooks default to remembering and skipping', async () => 
   UserData.setSkipsShuffle(podcast, false);
   assert.strictEqual(UserData.skipsShuffle(podcast), false);
 });
+
+test('remembers which playlists it put on the iPod', async () => {
+  const { UserData } = await setup();
+  assert.strictEqual(UserData.ipodPlaylists.length, 0);
+  UserData.setIpodPlaylists(['Trip']);
+  assert.deepStrictEqual([...UserData.ipodPlaylists], ['Trip']);
+});
+
+const played = (UserData, key, times) => {
+  const track = song(key);
+  for (let i = 0; i < times; i++) UserData.countPlay(track);
+  return track;
+};
+
+test('Most Played holds the top twenty five, highest first', async () => {
+  const { UserData } = await setup();
+  const tracks = Array.from({ length: 30 }, (_, i) => played(UserData, `s${i}`, i + 1));
+  const top = UserData.mostPlayed(tracks);
+  assert.strictEqual(top.length, 25);
+  assert.strictEqual(top[0].key, 's29');
+  assert.strictEqual(top[24].key, 's5');
+});
+
+test('Most Played leaves out songs never played', async () => {
+  const { UserData } = await setup();
+  const top = UserData.mostPlayed([song('never'), played(UserData, 'once', 1)]);
+  assert.deepStrictEqual([...top.map((t) => t.key)], ['once']);
+});
+
+test('songs level on plays go by the most recently played', async () => {
+  const { UserData } = await setup({ songs: { old: { plays: 2, lastPlayed: 100 }, recent: { plays: 2, lastPlayed: 900 } }, playlists: [] });
+  const top = UserData.mostPlayed([song('old'), song('recent')]);
+  assert.deepStrictEqual([...top.map((t) => t.key)], ['recent', 'old']);
+});
+
+test('Most Played leaves the list it was given alone', async () => {
+  const { UserData } = await setup();
+  const tracks = [played(UserData, 'a', 1), played(UserData, 'b', 2)];
+  UserData.mostPlayed(tracks);
+  assert.deepStrictEqual([...tracks.map((t) => t.key)], ['a', 'b']);
+});

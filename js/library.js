@@ -248,6 +248,20 @@ const Library = (() => {
     DB.put('tags', track.cacheKey, meta);
   }
 
+  // An album's songs split by disc, or null unless that gives two or more clean
+  // groups. Songs that don't run disc by disc can't sit under headings.
+  function discGroups(tracks) {
+    const groups = [];
+    for (const track of tracks) {
+      const disc = track.discNo || 1;
+      const last = groups[groups.length - 1];
+      if (last && last.disc === disc) last.tracks.push(track);
+      else groups.push({ disc, tracks: [track] });
+    }
+    const clean = new Set(groups.map((group) => group.disc)).size === groups.length;
+    return groups.length > 1 && clean ? groups : null;
+  }
+
   return {
     ingest,
     exportTracks,
@@ -258,6 +272,7 @@ const Library = (() => {
     fold,
     setDuration,
     isAudio,
+    discGroups,
     compareText: (a, b) => collator.compare(a, b),
     get tracks() { return getIndex().tracks; },
     byKey: (key) => getIndex().byKey.get(key),

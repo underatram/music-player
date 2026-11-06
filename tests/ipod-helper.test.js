@@ -49,7 +49,7 @@ test('adds songs with their numbers and copies the files', { skip }, async () =>
     add('Two', { track: 2, trackTotal: 2, disc: 1, discTotal: 1, album: 'First', cover }),
   ]);
   assert.strictEqual(code, 0, out.join('|'));
-  assert.strictEqual(out.at(-1), 'D 0 2 0');
+  assert.strictEqual(out.at(-1), 'D 0 2 0 0');
   const { tracks, name, kinds } = read(mount);
   assert.strictEqual(name, 'Test iPod');
   assert.strictEqual(kinds.music.songs, 2);
@@ -75,7 +75,7 @@ test('removes only what it\'s told to, and deletes the files', { skip }, async (
   const kept = before2.find((t) => t.title === 'Keep');
   const { code, out } = await F.runHelper(mount, [F.removeLine(gone.path)]);
   assert.strictEqual(code, 0);
-  assert.strictEqual(out.at(-1), 'D 1 0 0');
+  assert.strictEqual(out.at(-1), 'D 1 0 0 0');
   assert.deepStrictEqual(read(mount).tracks.map((t) => t.title), ['Keep']);
   assert(!fs.existsSync(onDisk(mount, gone.path)), 'the file stayed');
   assert(fs.existsSync(onDisk(mount, kept.path)), 'the wrong file went');
@@ -86,7 +86,7 @@ test('removing a path that isn\'t there does nothing', { skip }, async () => {
   await F.runHelper(mount, [add('Keep')]);
   const { code, out } = await F.runHelper(mount, [F.removeLine(':iPod_Control:Music:F00:NONE.mp3')]);
   assert.strictEqual(code, 0);
-  assert.strictEqual(out.at(-1), 'D 0 0 0');
+  assert.strictEqual(out.at(-1), 'D 0 0 0 0');
   assert.strictEqual(read(mount).tracks.length, 1);
 });
 
@@ -95,7 +95,7 @@ test('removes and adds in one sync', { skip }, async () => {
   await F.runHelper(mount, [add('Old')]);
   const [old] = read(mount).tracks;
   const { out } = await F.runHelper(mount, [F.removeLine(old.path), add('New')]);
-  assert.strictEqual(out.at(-1), 'D 1 1 0');
+  assert.strictEqual(out.at(-1), 'D 1 1 0 0');
   assert.deepStrictEqual(read(mount).tracks.map((t) => t.title), ['New']);
   assert.strictEqual(musicFiles(mount).length, 1);
 });
@@ -107,7 +107,7 @@ test('updates numbers without touching the song\'s file', { skip }, async () => 
   const file = onDisk(mount, song.path);
   const stamp = fs.statSync(file).mtimeMs;
   const { out } = await F.runHelper(mount, [F.updateLine({ path: song.path, track: 1, trackTotal: 12, disc: 1, discTotal: 1 })]);
-  assert.strictEqual(out.at(-1), 'D 0 0 1');
+  assert.strictEqual(out.at(-1), 'D 0 0 1 0');
   const [updated] = read(mount).tracks;
   assert.deepStrictEqual([updated.trackNo, updated.trackTotal, updated.discNo, updated.discTotal, updated.path], [1, 12, 1, 1, song.path]);
   assert.strictEqual(fs.statSync(file).mtimeMs, stamp);
@@ -143,7 +143,7 @@ test('a song that can\'t be copied is reported and the rest carry on', { skip },
   const { code, out } = await F.runHelper(mount, [bad, good]);
   assert.strictEqual(code, 0);
   assert(out.some((l) => l.startsWith('F 0 ')));
-  assert.strictEqual(out.at(-1), 'D 0 1 0');
+  assert.strictEqual(out.at(-1), 'D 0 1 0 0');
   assert.deepStrictEqual(read(mount).tracks.map((t) => t.title), ['Good']);
 });
 
@@ -151,12 +151,97 @@ test('being stopped saves what\'s been copied, cleanly', { skip }, async () => {
   const mount = newIpod();
   const { code, out } = await F.runHelper(mount, Array.from({ length: 40 }, (_, i) => add(`Song ${i}`)), { signalAfterFirstSong: true });
   assert.strictEqual(code, 0);
-  const finished = /^D 0 (\d+) 0$/.exec(out.at(-1));
+  const finished = /^D 0 (\d+) 0 0$/.exec(out.at(-1));
   assert(finished, out.at(-1));
   const count = Number(finished[1]);
   assert(count >= 1 && count < 40, `copied ${count}`);
   assert.strictEqual(read(mount).tracks.length, count);
   assert.strictEqual(musicFiles(mount).length, count);
+});
+
+const listNamed = (mount, name) => read(mount).lists.find((list) => list.name === name);
+const titlesIn = (mount, list) => {
+  const { tracks } = read(mount);
+  return list.paths.map((p) => tracks.find((t) => t.path === p).title);
+};
+
+test('makes a playlist from new and existing songs, in order', { skip }, async () => {
+  const mount = newIpod();
+  await F.runHelper(mount, [add('Old')]);
+  const [old] = read(mount).tracks;
+  const { code, out } = await F.runHelper(mount, [add('New A'), add('New B'), F.listLine('Trip', ['+1', old.path, '+0'])]);
+  assert.strictEqual(code, 0, out.join('|'));
+  assert.strictEqual(out.at(-1), 'D 0 2 0 1');
+  const list = listNamed(mount, 'Trip');
+  assert.strictEqual(list.smart, false);
+  assert.deepStrictEqual(titlesIn(mount, list), ['New B', 'Old', 'New A']);
+});
+
+test('sending a playlist again replaces its songs and order', { skip }, async () => {
+  const mount = newIpod();
+  await F.runHelper(mount, [add('A'), add('B'), add('C')]);
+  const songs = Object.fromEntries(read(mount).tracks.map((t) => [t.title, t.path]));
+  await F.runHelper(mount, [F.listLine('Trip', [songs.A, songs.B])]);
+  await F.runHelper(mount, [F.listLine('Trip', [songs.C, songs.A])]);
+  assert.deepStrictEqual(titlesIn(mount, listNamed(mount, 'Trip')), ['C', 'A']);
+  assert.strictEqual(read(mount).lists.filter((l) => l.name === 'Trip').length, 1);
+  assert.strictEqual(read(mount).tracks.length, 3, 'songs stay on the iPod');
+});
+
+test('deleting a playlist keeps its songs', { skip }, async () => {
+  const mount = newIpod();
+  await F.runHelper(mount, [add('A'), F.listLine('Trip', ['+0'])]);
+  const { out } = await F.runHelper(mount, [F.deleteListLine('Trip')]);
+  assert.strictEqual(out.at(-1), 'D 0 0 0 1');
+  assert.strictEqual(listNamed(mount, 'Trip'), undefined);
+  assert.strictEqual(read(mount).tracks.length, 1);
+});
+
+test('the main music list can\'t be deleted or overwritten', { skip }, async () => {
+  const mount = newIpod();
+  await F.runHelper(mount, [add('A'), add('B')]);
+  const [a] = read(mount).tracks;
+  const { out } = await F.runHelper(mount, [F.deleteListLine('Test iPod'), F.listLine('Test iPod', [a.path])]);
+  assert.strictEqual(out.at(-1), 'D 0 0 0 0');
+  const main = read(mount).lists.find((l) => l.master);
+  assert.strictEqual(main.name, 'Test iPod');
+  assert.strictEqual(main.paths.length, 2);
+});
+
+test('a smart playlist can\'t be deleted or overwritten', { skip }, async () => {
+  const mount = newIpod();
+  await F.runHelper(mount, [add('A')]);
+  const before = listNamed(mount, 'Smart Mix');
+  assert.strictEqual(before.smart, true, 'the fake iPod should have one');
+  const [a] = read(mount).tracks;
+  const { out } = await F.runHelper(mount, [F.deleteListLine('Smart Mix'), F.listLine('Smart Mix', [a.path])]);
+  assert.strictEqual(out.at(-1), 'D 0 0 0 0');
+  const after = listNamed(mount, 'Smart Mix');
+  assert.strictEqual(after.smart, true);
+  assert.deepStrictEqual(after.paths, before.paths);
+});
+
+test('removing a song takes it out of its playlists', { skip }, async () => {
+  const mount = newIpod();
+  await F.runHelper(mount, [add('A'), add('B'), F.listLine('Trip', ['+0', '+1'])]);
+  const a = read(mount).tracks.find((t) => t.title === 'A');
+  await F.runHelper(mount, [F.removeLine(a.path)]);
+  assert.deepStrictEqual(titlesIn(mount, listNamed(mount, 'Trip')), ['B']);
+});
+
+test('a song that couldn\'t be copied is left out of its playlist', { skip }, async () => {
+  const mount = newIpod();
+  const bad = add('Bad').replace(mp3, path.join(dir, 'no-such-file.mp3'));
+  await F.runHelper(mount, [bad, add('Good'), F.listLine('Trip', ['+0', '+1'])]);
+  assert.deepStrictEqual(titlesIn(mount, listNamed(mount, 'Trip')), ['Good']);
+});
+
+test('a stopped sync leaves its playlists for next time', { skip }, async () => {
+  const mount = newIpod();
+  const lines = Array.from({ length: 40 }, (_, i) => add(`Song ${i}`));
+  const { out } = await F.runHelper(mount, [...lines, F.listLine('Trip', ['+0'])], { signalAfterFirstSong: true });
+  assert.match(out.at(-1), / 0$/);
+  assert.strictEqual(listNamed(mount, 'Trip'), undefined);
 });
 
 test('plays waiting in the Play Counts file are read', { skip }, async () => {

@@ -116,6 +116,7 @@ function parseDatabase(db) {
     audiobooks: { songs: 0, bytes: 0 },
   };
   const tracks = [];
+  const pathsById = new Map();
   let milliseconds = 0;
   let plays = 0;
   let playlists = null;
@@ -131,6 +132,7 @@ function parseDatabase(db) {
       for (let n = 0; n < u32(list + 8); n++) {
         const text = strings(p + u32(p + 4), u32(p + 12), [1, 2, 3, 4, 5]);
         const { 5: genre = '' } = text;
+        pathsById.set(u32(p + 16), text[2] || '');
         tracks.push({
           path: text[2] || '',
           title: text[1] || '',
@@ -157,14 +159,26 @@ function parseDatabase(db) {
         const { 1: title = '' } = strings(p + u32(p + 4), u32(p + 12), [1]);
         const isMaster = Boolean(db[p + 20]);
         if (isMaster) name = title;
-        else found.push({ name: title, songs: u32(p + 16) });
+        let q = p + u32(p + 4);
+        let smart = false;
+        for (let m = 0; m < u32(p + 12); m++) {
+          if (u32(q + 12) === 50 || u32(q + 12) === 51) smart = true;
+          q += u32(q + 8);
+        }
+        const ids = [];
+        for (let m = 0; m < u32(p + 16); m++) {
+          ids.push(u32(q + 24));
+          q += u32(q + 8);
+        }
+        found.push({ name: title, songs: u32(p + 16), smart, master: isMaster, ids });
         p += u32(p + 8);
       }
       if (type === 3 || !playlists) playlists = found;
     }
     section += total;
   }
-  return { name, kinds, milliseconds, plays, tracks, playlists: playlists || [] };
+  const lists = (playlists || []).map(({ ids, ...list }) => ({ ...list, paths: ids.map((id) => pathsById.get(id)).filter(Boolean) }));
+  return { name, kinds, milliseconds, plays, tracks, lists, playlists: lists.filter((list) => !list.master).map(({ name: title, songs }) => ({ name: title, songs })) };
 }
 
 // Plays since the last sync wait in a separate file, in the same order as the songs.
@@ -233,18 +247,21 @@ function describe() {
     capacity: bsize * blocks,
     free: bsize * bavail,
     lastSynced: mtimeMs,
-    contents: cached.contents && { ...cached.contents, tracks: undefined },
+    contents: cached.contents && { ...cached.contents, tracks: undefined, lists: undefined },
   };
 }
 
-// Every song on the iPod, for working out what a sync would change.
+// Every song and playlist on the iPod, for working out what a sync would change.
 function songs() {
   describe();
-  if (!cached || !cached.contents) return [];
-  return cached.contents.tracks.map((track) => ({
-    ...track,
-    lastPlayed: track.lastPlayed ? (track.lastPlayed - MAC_EPOCH_SECONDS) * 1000 : 0,
-  }));
+  if (!cached || !cached.contents) return { songs: [], lists: [] };
+  return {
+    songs: cached.contents.tracks.map((track) => ({
+      ...track,
+      lastPlayed: track.lastPlayed ? (track.lastPlayed - MAC_EPOCH_SECONDS) * 1000 : 0,
+    })),
+    lists: cached.contents.lists,
+  };
 }
 
 function backUp(mount, backupRoot) {
@@ -281,7 +298,8 @@ async function coverFiles(additions, folder) {
   return byAlbum;
 }
 
-// request: { removals: [paths on the iPod], additions: [songs], updates: [new numbers] }
+// request: { removals: [paths on the iPod], additions: [songs], updates: [new numbers],
+//   lists: { writes: [{ name, songs }], deletes: [names] } }
 async function sync(request, { helper, backupRoot, onProgress }) {
   if (syncing) throw new Error('A sync is already running.');
   const mount = findMount();
@@ -301,6 +319,9 @@ async function sync(request, { helper, backupRoot, onProgress }) {
       ...request.updates.map((song) => ['U', song.path, song.trackNo, song.trackTotal, song.discNo, song.discTotal].map(clean).join(FIELD_SEPARATOR)),
       ...request.additions.map((song) => ['A', song.fullPath, song.title, song.artist, song.albumArtist, song.album, song.genre,
         song.year, song.trackNo, song.trackTotal, song.discNo, song.discTotal, song.compilation ? 1 : 0, song.duration, song.size, covers.get(song.albumKey)]
+        .map(clean).join(FIELD_SEPARATOR)),
+      ...request.lists.deletes.map((name) => `K${FIELD_SEPARATOR}${clean(name)}`),
+      ...request.lists.writes.map(({ name, songs: listed }) => ['L', name, ...listed.map((song) => (song.add !== undefined ? `+${song.add}` : song.path))]
         .map(clean).join(FIELD_SEPARATOR)),
     ];
 
@@ -322,7 +343,7 @@ async function sync(request, { helper, backupRoot, onProgress }) {
           else if (code === 'W') onProgress({ phase: 'saving' });
           else if (code === 'F') failures.push({ title: request.additions[Number(rest[0])].title, message: rest.slice(1).join(' ') });
           else if (code === 'E') problem = rest.join(' ');
-          else if (code === 'D') finished = { removed: Number(rest[0]), added: Number(rest[1]), updated: Number(rest[2]) };
+          else if (code === 'D') finished = { removed: Number(rest[0]), added: Number(rest[1]), updated: Number(rest[2]), playlists: Number(rest[3]) };
         }
       });
       child.on('error', reject);

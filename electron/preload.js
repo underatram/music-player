@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('musicHost', {
     ipcRenderer.on('host:write-progress', (_event, fraction) => listener(fraction));
   },
   setMini: (on) => ipcRenderer.invoke('host:set-mini', on),
+  windowControl: (action) => ipcRenderer.invoke('host:window', action),
+  onMaximised: (listener) => {
+    ipcRenderer.on('host:maximised', (_event, maximised) => listener(maximised));
+  },
   setMiniQueue: (open) => ipcRenderer.invoke('host:set-mini-queue', open),
   readData: () => ipcRenderer.invoke('host:read-data'),
   writeData: (data) => ipcRenderer.invoke('host:write-data', data),

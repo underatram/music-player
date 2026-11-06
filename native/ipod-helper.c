@@ -5,6 +5,10 @@
 //   R <path on the iPod>        remove this song
 //   A <the FIELD_ values below> add this song
 //   U <path on the iPod> <track> <of> <disc> <of>  correct a song's numbers
+//   L <name> <song> <song> ...  make this playlist hold exactly these songs, where
+//                               a song is a path on the iPod, or + and the number
+//                               of an addition
+//   K <name>                    delete this playlist
 // Removals happen first, to free the space. The database is saved before any
 // removed file is deleted, so an interruption can't leave it listing missing songs.
 // Reports progress on stdout, one line at a time:
@@ -12,7 +16,7 @@
 //   P <index>            song number <index> of the additions was copied
 //   F <index> <message>  that song couldn't be copied
 //   W                    saving the database
-//   D <removed> <added> <updated>  finished
+//   D <removed> <added> <updated> <playlists>  finished
 //   E <message>          stopped because of a problem
 // SIGTERM stops after the current song and still saves what's been done.
 #include <errno.h>
@@ -140,6 +144,53 @@ static int update_songs(Itdb_iTunesDB *db, GPtrArray *updates) {
   return updated;
 }
 
+static Itdb_Playlist *ordinary_playlist(Itdb_iTunesDB *db, const char *name) {
+  Itdb_Playlist *playlist = itdb_playlist_by_name(db, (gchar *)name);
+  if (!playlist || playlist->is_spl || itdb_playlist_is_mpl(playlist) || itdb_playlist_is_podcasts(playlist)) return NULL;
+  return playlist;
+}
+
+// Playlists are done last, once every song they might hold is on the iPod. A
+// smart playlist or the main music list with the same name is left alone.
+static int update_playlists(Itdb_iTunesDB *db, GPtrArray *writes, GPtrArray *deletes, GPtrArray *added) {
+  GHashTable *by_path = g_hash_table_new(g_str_hash, g_str_equal);
+  for (GList *l = db->tracks; l; l = l->next) {
+    Itdb_Track *track = l->data;
+    if (track->ipod_path) g_hash_table_insert(by_path, track->ipod_path, track);
+  }
+
+  int changed = 0;
+  for (guint i = 0; i < deletes->len; i++) {
+    Itdb_Playlist *playlist = ordinary_playlist(db, g_ptr_array_index(deletes, i));
+    if (!playlist) continue;
+    itdb_playlist_remove(playlist);
+    changed++;
+  }
+  for (guint i = 0; i < writes->len; i++) {
+    gchar **fields = g_ptr_array_index(writes, i);
+    Itdb_Playlist *playlist = ordinary_playlist(db, fields[0]);
+    if (!playlist) {
+      if (itdb_playlist_by_name(db, fields[0])) continue;
+      playlist = itdb_playlist_new(fields[0], FALSE);
+      itdb_playlist_add(db, playlist, -1);
+    }
+    while (playlist->members) itdb_playlist_remove_track(playlist, playlist->members->data);
+    for (gchar **song = fields + 1; *song; song++) {
+      Itdb_Track *track = NULL;
+      if ((*song)[0] == '+') {
+        guint index = (guint)atoi(*song + 1);
+        if (index < added->len) track = g_ptr_array_index(added, index);
+      } else {
+        track = g_hash_table_lookup(by_path, *song);
+      }
+      if (track) itdb_playlist_add_track(playlist, track, -1);
+    }
+    changed++;
+  }
+  g_hash_table_destroy(by_path);
+  return changed;
+}
+
 int main(int argc, char **argv) {
   if (argc != 3 || strcmp(argv[1], "sync") != 0) {
     printf("E usage: ipod-helper sync <mount>\n");
@@ -170,6 +221,8 @@ int main(int argc, char **argv) {
   GPtrArray *removals = g_ptr_array_new_with_free_func(g_free);
   GPtrArray *additions = g_ptr_array_new_with_free_func((GDestroyNotify)g_strfreev);
   GPtrArray *updates = g_ptr_array_new_with_free_func((GDestroyNotify)g_strfreev);
+  GPtrArray *list_writes = g_ptr_array_new_with_free_func((GDestroyNotify)g_strfreev);
+  GPtrArray *list_deletes = g_ptr_array_new_with_free_func(g_free);
   char *line = NULL;
   size_t capacity = 0;
   while (getline(&line, &capacity, stdin) > 0) {
@@ -190,6 +243,10 @@ int main(int argc, char **argv) {
         return 6;
       }
       g_ptr_array_add(updates, fields);
+    } else if (line[0] == 'L' && line[1] == '\x1f') {
+      g_ptr_array_add(list_writes, g_strsplit(line + 2, "\x1f", -1));
+    } else if (line[0] == 'K' && line[1] == '\x1f') {
+      g_ptr_array_add(list_deletes, g_strdup(line + 2));
     } else if (line[0]) {
       printf("E Bad instruction\n");
       return 6;
@@ -203,8 +260,11 @@ int main(int argc, char **argv) {
   int updated = update_songs(db, updates);
   int added = 0;
   int unsaved = updated;
+  // Each addition's new song, or NULL if it couldn't be copied.
+  GPtrArray *added_tracks = g_ptr_array_new();
   for (guint index = 0; index < additions->len && !stopping; index++) {
     gchar **fields = g_ptr_array_index(additions, index);
+    g_ptr_array_add(added_tracks, NULL);
     Itdb_Track *track = make_track(fields);
     itdb_track_add(db, track, -1);
     GError *copy_error = NULL;
@@ -215,6 +275,7 @@ int main(int argc, char **argv) {
       continue;
     }
     itdb_playlist_add_track(everything, track, -1);
+    g_ptr_array_index(added_tracks, index) = track;
     // A cover that won't load shouldn't stop the song being added.
     if (fields[FIELD_COVER][0]) itdb_track_set_thumbnails(track, fields[FIELD_COVER]);
     added++;
@@ -225,9 +286,12 @@ int main(int argc, char **argv) {
       unsaved = 0;
     }
   }
-  if (unsaved && !save(db)) return 5;
 
-  printf("D %d %d %d\n", removed, added, updated);
+  // A sync stopped early hasn't got every song yet, so its playlists wait for the next one.
+  int playlists = stopping ? 0 : update_playlists(db, list_writes, list_deletes, added_tracks);
+  if ((unsaved || playlists) && !save(db)) return 5;
+
+  printf("D %d %d %d %d\n", removed, added, updated, playlists);
   itdb_free(db);
   return 0;
 }

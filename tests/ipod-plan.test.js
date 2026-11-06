@@ -77,3 +77,84 @@ test('songs with blank totals on the iPod get updated, not recopied', () => {
   const [update] = p.updates;
   assert.deepStrictEqual([update.path, update.trackNo, update.trackTotal, update.discNo, update.discTotal], [':F00:A.mp3', 2, 12, 1, 1]);
 });
+
+// ---- Playlists ----
+
+const compute = (options) => IpodPlan.compute({ fold, wanted: [], ipodSongs: [], ...options });
+const list = (name, tracks) => ({ name, tracks });
+const onIpod = (name, paths, extra = {}) => ({ name, paths, smart: false, master: false, ...extra });
+
+test('a new playlist refers to songs by where they\'ll be', () => {
+  const [old, fresh] = [lib('Old'), lib('Fresh')];
+  const { lists } = compute({ wanted: [old, fresh], ipodSongs: [pod('Old')], playlists: [list('Trip', [fresh, old])] });
+  assert.strictEqual(lists.writes.length, 1);
+  assert.deepStrictEqual(lists.writes[0].songs.map((song) => ({ ...song })), [{ add: 0 }, { path: ':F00:Old.mp3' }]);
+  assert.deepStrictEqual([...lists.kept], ['Trip']);
+});
+
+test('an unchanged playlist isn\'t sent again', () => {
+  const a = lib('A');
+  const { lists } = compute({ wanted: [a], ipodSongs: [pod('A')], playlists: [list('Trip', [a])], ipodLists: [onIpod('Trip', [':F00:A.mp3'])], managed: ['Trip'] });
+  assert.strictEqual(lists.writes.length, 0);
+  assert.deepStrictEqual([...lists.kept], ['Trip']);
+});
+
+test('a reordered playlist is sent again', () => {
+  const [a, b] = [lib('A'), lib('B')];
+  const { lists } = compute({ wanted: [a, b], ipodSongs: [pod('A'), pod('B')], playlists: [list('Trip', [b, a])], ipodLists: [onIpod('Trip', [':F00:A.mp3', ':F00:B.mp3'])], managed: ['Trip'] });
+  assert.strictEqual(lists.writes.length, 1);
+});
+
+test('songs not going on the iPod are left out of its playlists', () => {
+  const [a, b] = [lib('A'), lib('B')];
+  const { lists } = compute({ wanted: [a], ipodSongs: [pod('A')], playlists: [list('Trip', [a, b])] });
+  assert.deepStrictEqual(lists.writes[0].songs.map((song) => song.path), [':F00:A.mp3']);
+});
+
+test('only playlists the app put there are deleted', () => {
+  const { lists } = compute({ ipodLists: [onIpod('Mine', []), onIpod('From iTunes', [])], managed: ['Mine'] });
+  assert.deepStrictEqual([...lists.deletes], ['Mine']);
+});
+
+test('smart playlists and the main list are never deleted, even if remembered', () => {
+  const { lists } = compute({ ipodLists: [onIpod('Smart', [], { smart: true }), onIpod('Main', [], { master: true })], managed: ['Smart', 'Main'] });
+  assert.strictEqual(lists.deletes.length, 0);
+});
+
+test('a playlist named like a smart one isn\'t sent, and says so', () => {
+  const { lists } = compute({ wanted: [lib('A')], playlists: [list('Recently Added', [lib('A')])], ipodLists: [onIpod('Recently Added', [], { smart: true })] });
+  assert.strictEqual(lists.writes.length, 0);
+  assert.deepStrictEqual([...lists.conflicts], ['Recently Added']);
+  assert.strictEqual(lists.kept.length, 0, 'it must never count as ours');
+});
+
+test('a playlist that\'s gone from the iPod is sent again', () => {
+  const a = lib('A');
+  const { lists } = compute({ wanted: [a], ipodSongs: [pod('A')], playlists: [list('Trip', [a])], managed: ['Trip'] });
+  assert.strictEqual(lists.writes.length, 1);
+});
+
+test('a playlist from elsewhere with the same name is left alone, and says so', () => {
+  const a = lib('A');
+  const { lists } = compute({ wanted: [a], ipodSongs: [pod('A')], playlists: [list('Road', [a])], ipodLists: [onIpod('Road', [])] });
+  assert.strictEqual(lists.writes.length, 0);
+  assert.deepStrictEqual([...lists.conflicts], ['Road']);
+  assert.strictEqual(lists.kept.length, 0);
+});
+
+test('two playlists with the same name both go across', () => {
+  const [a, b] = [lib('A'), lib('B')];
+  const twice = { wanted: [a, b], ipodSongs: [pod('A'), pod('B')], playlists: [list('Mix', [a]), list('Mix', [b])] };
+  const { lists } = compute(twice);
+  assert.deepStrictEqual([...lists.writes.map((w) => w.name)], ['Mix', 'Mix 2']);
+  const synced = compute({ ...twice, managed: ['Mix', 'Mix 2'], ipodLists: [onIpod('Mix', [':F00:A.mp3']), onIpod('Mix 2', [':F00:B.mp3'])] });
+  assert.strictEqual(synced.lists.writes.length, 0, 'they must settle, not send forever');
+  assert.strictEqual(synced.lists.deletes.length, 0);
+});
+
+test('a stopped sync doesn\'t forget a playlist it was due to delete', () => {
+  const lists = { writes: [{ name: 'New' }], deletes: ['Old'], kept: ['New'] };
+  assert.deepStrictEqual([...IpodPlan.playlistsToRemember(['Old'], lists)], ['Old', 'New'], 'before the sync');
+  assert.deepStrictEqual([...IpodPlan.playlistsToRemember(['Old', 'New'], lists, 0)], ['Old', 'New'], 'stopped');
+  assert.deepStrictEqual([...IpodPlan.playlistsToRemember(['Old', 'New'], lists, 2)], ['New'], 'finished');
+});

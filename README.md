@@ -9,7 +9,7 @@ A fast desktop music player for Ubuntu, built for people who keep their own musi
 - **Browse your way:** go through Artists, Albums, Genres or Years. Artist names ignore "The", so The Antlers sorts under A.
 - **Built for big libraries:** tested with about 12,000 songs. After the first scan it opens in around a second.
 - **Separate libraries for Music, Podcasts and Audiobooks:** anything tagged with the genre `Podcast` or `Audiobook` gets its own visual library, with covers and progress bars. It stays out of Shuffle All and your smart playlists, and it remembers your place.
-- **Playlists:** make your own, plus Recently Played, Most Played and Most Liked, which fill themselves in.
+- **Playlists:** make your own, plus Recently Played, Most Played (your top 25) and Most Liked, which fill themselves in.
 - **Up Next:** right-click any song and choose Play Next.
 - **Mini player:** shrink the app to a slim bar with all the controls.
 - **Shuffle and repeat:** repeat one song or a whole list, and mark songs to skip when shuffling.
@@ -36,7 +36,8 @@ It's built for 64-bit Intel and AMD computers. It's been tested on Ubuntu with G
 This is new and has only been tested on one iPod classic, so back up anything that exists only on your iPod first.
 
 - **A sync makes the iPod match what's ticked.** Any song on the iPod that isn't ticked or in your library is deleted from the iPod. You see exact numbers and confirm before anything is removed, and the files in your library aren't touched.
-- **MP3 only so far.** Your own playlists don't go across yet, and podcasts and audiobooks appear as ordinary songs on the iPod.
+- **Your own playlists go across,** in their order. Smart playlists stay behind, and the app only ever changes or deletes playlists it put on the iPod itself.
+- **MP3 only so far,** and podcasts and audiobooks appear as ordinary songs on the iPod.
 - **Eject before unplugging**, using the button next to your iPod under Devices.
 
 Newer iPods that don't show up as a drive, such as the iPod touch, aren't supported. If the app can't identify your model, it won't write to it. Running `sudo ipod-read-sysinfo-extended <bus> <device> <mount>` once may help, using the numbers from `lsusb`.

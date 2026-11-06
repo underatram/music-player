@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div class="backdrop" aria-hidden="true"><img id="backdrop-art" alt="" hidden></div>
   <svg width="0" height="0" class="sprite" aria-hidden="true">
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6 4h4.500v16H6zM13.500 4H18v16h-4.500z"/></symbol>
@@ -29,6 +30,10 @@
     <symbol id="i-album" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 9.500a2.500 2.500 0 1 0 0 5 2.500 2.500 0 0 0 0-5z" fill="none" stroke="currentColor" stroke-width="1.800" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-genre" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM19 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z" fill="none" stroke="currentColor" stroke-width="1.800" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-year" viewBox="0 0 24 24"><path d="M5 6h14a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zM4 10.500h16M8 3.500v4M16 3.500v4" fill="none" stroke="currentColor" stroke-width="1.800" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-minimise" viewBox="0 0 14 14"><path d="M2 7h10" fill="none" stroke="currentColor" stroke-width="1.600" stroke-linecap="round"/></symbol>
+    <symbol id="i-maximise" viewBox="0 0 14 14"><rect x="2.500" y="2.500" width="9" height="9" rx="1.500" fill="none" stroke="currentColor" stroke-width="1.600"/></symbol>
+    <symbol id="i-restore" viewBox="0 0 14 14"><path d="M4.500 4.500V3a.8.8 0 0 1 .8-.8h5.700a.8.8 0 0 1 .8.8v5.700a.8.8 0 0 1-.8.8H9.500M3 4.500h5.700a.8.8 0 0 1 .8.8V11a.8.8 0 0 1-.8.8H3a.8.8 0 0 1-.8-.8V5.300a.8.8 0 0 1 .8-.8z" fill="none" stroke="currentColor" stroke-width="1.400" stroke-linejoin="round"/></symbol>
+    <symbol id="i-close" viewBox="0 0 14 14"><path d="M3 3l8 8M11 3l-8 8" fill="none" stroke="currentColor" stroke-width="1.600" stroke-linecap="round"/></symbol>
     <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4.500V4.500L8 9z"/><path d="M16 8.500a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   </svg>
 
@@ -62,6 +67,12 @@
         <svg class="icon" aria-hidden="true"><use href="#i-volume"/></svg>
         <input id="volume" class="slider" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
       </div>
+
+      <div class="window-controls" hidden>
+        <button class="window-button" data-window="minimise" aria-label="Minimise" title="Minimise"><svg class="icon" aria-hidden="true"><use href="#i-minimise"/></svg></button>
+        <button class="window-button window-maximise" data-window="maximise" aria-label="Maximise" title="Maximise"><svg class="icon" aria-hidden="true"><use href="#i-maximise"/></svg></button>
+        <button class="window-button" data-window="close" aria-label="Close" title="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+      </div>
     </header>
 
     <div class="body">
@@ -87,6 +98,7 @@
       <aside id="queue" class="queue" aria-label="Up Next" hidden></aside>
     </div>
   </div>
+
 
   <input id="folder-input" type="file" webkitdirectory multiple hidden>
   <div id="toast" class="toast" role="status" hidden></div>

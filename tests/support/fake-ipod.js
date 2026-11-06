@@ -42,6 +42,8 @@ function makeIpod(maker, mount) {
 const SEP = '\x1f';
 const addLine = (file, s) => ['A', file, s.title, s.artist || 'Artist', s.albumArtist || '', s.album || 'Album', s.genre || 'Rock', s.year || 2001, s.track ?? 1, s.trackTotal ?? 1, s.disc ?? 1, s.discTotal ?? 1, 0, s.seconds || 10, fs.statSync(file).size, s.cover || ''].join(SEP);
 const removeLine = (ipodPath) => `R${SEP}${ipodPath}`;
+const listLine = (name, songs) => ['L', name, ...songs].join(SEP);
+const deleteListLine = (name) => `K${SEP}${name}`;
 const updateLine = (u) => ['U', u.path, u.track, u.trackTotal, u.disc, u.discTotal].join(SEP);
 
 function runHelper(mount, lines, { signalAfterFirstSong = false } = {}) {
@@ -58,4 +60,4 @@ function runHelper(mount, lines, { signalAfterFirstSong = false } = {}) {
   });
 }
 
-module.exports = { canBuild, buildTools, makeIpod, runHelper, addLine, removeLine, updateLine };
+module.exports = { canBuild, buildTools, makeIpod, runHelper, addLine, removeLine, updateLine, listLine, deleteListLine };

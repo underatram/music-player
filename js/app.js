@@ -24,9 +24,11 @@ const App = (() => {
   // The boxes in the edit window. Spans are out of six columns.
   const ALBUM_FIELDS = [
     { key: 'album', label: 'Album', span: 6 },
+    { key: 'artist', label: 'Artist', span: 3 },
     { key: 'albumArtist', label: 'Album Artist', span: 3 },
-    { key: 'genre', label: 'Genre', span: 3 },
+    { key: 'genre', label: 'Genre', span: 4 },
     { key: 'year', label: 'Year', span: 2, numeric: true },
+    { key: 'trackTotal', label: 'Tracks in Album', span: 2, numeric: true },
     { key: 'disc', label: 'Disc', span: 2, numeric: true },
     { key: 'discTotal', label: 'Of', span: 2, numeric: true },
   ];
@@ -47,7 +49,11 @@ const App = (() => {
   const ROW_FIELDS = [
     { key: 'track', label: 'Track', numeric: true },
     { key: 'title', label: 'Title' },
-    { key: 'artist', label: 'Artist' },
+  ];
+  // Going song by song shows just these, in this order. The rest are a click away.
+  const STEP_FIELDS = [
+    { key: 'track', span: 1 },
+    { key: 'title', span: 5 },
   ];
   const NEW_MUSIC_LIST = 'new-music';
   const NEAR_END_SECONDS = 5;
@@ -67,10 +73,7 @@ const App = (() => {
       label: 'Most Played',
       icon: 'chart',
       empty: 'Songs appear here once you\'ve played them.',
-      tracks: () => tracksIn('music')
-        .filter((t) => UserData.plays(t) > 0)
-        .sort((a, b) => UserData.plays(b) - UserData.plays(a))
-        .slice(0, SMART_LIST_SIZE),
+      tracks: () => UserData.mostPlayed(tracksIn('music')),
     },
     {
       value: 'most-liked',
@@ -150,6 +153,8 @@ const App = (() => {
   ];
   // Takes the Genre column's place in Recently Played.
   const LAST_PLAYED_COLUMN = { label: 'Last Played', value: (t) => UserData.lastPlayed(t) || null };
+  // Album pages only. Sorting keeps each disc's songs together.
+  const TRACK_COLUMN = { label: '#', sortName: 'Track', value: (t) => (t.trackNo ? (t.discNo || 1) * 10000 + t.trackNo : null) };
 
   const $ = (selector) => document.querySelector(selector);
   const content = $('#content');
@@ -184,6 +189,7 @@ const App = (() => {
   let ipodOpen = false; // its page is showing instead of the library
   let ipodStamp = ''; // changes when there's something new to show
   let ipodSongs = []; // every song on the iPod
+  let ipodLists = []; // every playlist on the iPod
   let ipodSync = null; // how a running sync is going
   let ipodResult = null; // what the last sync did
   let songList = null; // the virtual list of songs on screen
@@ -467,6 +473,9 @@ const App = (() => {
   }
 
   function selectPath(next) {
+    // Albums open in track order, and a sort by an album-only column ends with the album.
+    const toAlbum = next.length > 0 && next[next.length - 1].field === 'album';
+    if (toAlbum || sortColumn === TRACK_COLUMN || sortColumn === LAST_PLAYED_COLUMN) sortColumn = null;
     path = next;
     ipodOpen = false;
     scanReport = null;
@@ -666,7 +675,7 @@ const App = (() => {
 
   const selection = new Set();
   let selectionAnchor = null;
-  let showLastPlayed = false; // whether the song list on screen has that column
+  let onAlbumPage = false; // whether the song list on screen has the album page's columns
 
   function clearSelection() {
     selection.clear();
@@ -973,6 +982,7 @@ const App = (() => {
         showSongMenu(event, track);
       },
     },
+      onAlbumPage ? el('span', { class: 'row-track' }, track.trackNo ? String(track.trackNo) : '') : null,
       el('span', { class: 'row-title' }, track.title),
       el('span', { class: 'row-sub' }, `${track.artist} · ${track.album}`),
       el('span', { class: 'row-artist' }, track.artist),
@@ -981,7 +991,7 @@ const App = (() => {
       el('span', { class: 'row-genre' }, isRecentlyPlayed() ? formatAgo(UserData.lastPlayed(track)) : (track.genre || '')),
       el('span', { class: 'row-time' }, formatTime(track.duration)),
       el('span', { class: 'row-plays' }, UserData.plays(track) ? String(UserData.plays(track)) : ''),
-      showLastPlayed ? el('span', { class: 'row-last' }, formatAgo(UserData.lastPlayed(track))) : null,
+      onAlbumPage ? el('span', { class: 'row-last' }, formatAgo(UserData.lastPlayed(track))) : null,
       heart);
   }
 
@@ -1111,6 +1121,9 @@ const App = (() => {
 
     let heading = query ? `Results for “${query}”` : 'All Songs';
     const details = [];
+    const isAlbumPage = path.length > 0 && path[path.length - 1].field === 'album' && tracks.length > 0;
+    // Sorting by anything but track number would scatter the discs.
+    const discs = isAlbumPage && (!sortColumn || sortColumn === TRACK_COLUMN) ? Library.discGroups(tracks) : null;
     if (path.length) {
       heading = path[path.length - 1].label;
       if (path[path.length - 1].field === 'album' && tracks.length) {
@@ -1119,30 +1132,43 @@ const App = (() => {
         if (albumYear && !path.some((step) => step.field === 'year')) details.push(String(albumYear));
       }
     }
+    if (discs) details.push(plural(discs.length, 'disc'));
     details.push(count);
     if (total) details.push(formatTotal(total));
 
-    const isAlbumPage = path.length > 0 && path[path.length - 1].field === 'album' && tracks.length > 0;
-    showLastPlayed = isAlbumPage;
+    onAlbumPage = isAlbumPage;
     const rowHeight = cssPixels('--row-height');
     const rows = el('div', { class: 'rows' });
     const canReorder = inPlaylist() && UserData.findPlaylist(path[0].value) && !query && !sortColumn;
     const reorder = canReorder ? playlistReorder(tracks, rows, rowHeight) : null;
-    songList = virtualList(scroller, rows, tracks.length, rowHeight, (i) => songRow(tracks[i], tracks, i, reorder));
+    const entries = discs ? discEntries(discs) : null;
+    const list = virtualList(scroller, rows, entries ? entries.length : tracks.length, rowHeight, (i) => {
+      if (!entries) return songRow(tracks[i], tracks, i, reorder);
+      const { group, index } = entries[i];
+      if (group) return discHeading(group);
+      return index === undefined ? el('div', { class: 'disc-gap' }) : songRow(tracks[index], tracks, index);
+    });
+    const stickyDisc = discs ? el('div', { class: 'disc-sticky', hidden: 'hidden' }) : null;
+    songList = list;
 
     let columns = COLUMNS;
     const columnClass = isAlbumPage ? 'with-last-played' : '';
     if (isRecentlyPlayed()) columns = COLUMNS.map((column) => (column.label === 'Genre' ? LAST_PLAYED_COLUMN : column));
-    if (isAlbumPage) columns = [...COLUMNS, LAST_PLAYED_COLUMN];
+    if (isAlbumPage) columns = [TRACK_COLUMN, ...COLUMNS, LAST_PLAYED_COLUMN];
     const head = el('div', { class: `list-head ${columnClass}` }, ...columns.map((column) => {
       const active = sortColumn === column;
       return el('button', {
         class: `column ${column.className || ''}`,
-        'aria-label': `Sort by ${column.label}`,
+        'aria-label': `Sort by ${column.sortName || column.label}`,
         'aria-pressed': active ? 'true' : 'false',
         onclick: () => sortBy(column),
       }, active ? `${column.label} ${sortDescending ? '▼' : '▲'}` : column.label);
     }), el('span', { class: 'column column-extra' }));
+
+    if (discs) {
+      const stick = stickDiscHeading(stickyDisc, head, rows, discs, rowHeight);
+      songList = { draw: (force) => { list.draw(force); if (rows.isConnected) stick(); } };
+    }
 
     return [
       renderCrumbs(),
@@ -1155,8 +1181,52 @@ const App = (() => {
           el('p', { class: 'meta' }, details.join(' · ')),
           pageLinks(tracks))),
       tracks.length ? head : el('p', { class: 'empty' }, emptyMessage()),
-      tracks.length ? el('div', { class: `rows-wrap ${columnClass}` }, rows, reorder ? reorder.line : null) : null,
+      tracks.length ? el('div', { class: `rows-wrap ${columnClass}` }, stickyDisc, rows, reorder ? reorder.line : null) : null,
     ].filter(Boolean);
+  }
+
+  // What a list split into discs shows, row by row: a gap before each disc but the
+  // first, its heading, then its songs.
+  function discEntries(discs) {
+    const entries = [];
+    let index = 0;
+    discs.forEach((group, i) => {
+      if (i) entries.push({});
+      group.top = entries.length;
+      entries.push({ group });
+      group.tracks.forEach(() => entries.push({ index: index++ }));
+    });
+    return entries;
+  }
+
+  function discHeading(group) {
+    const seconds = group.tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+    const detail = [plural(group.tracks.length, 'song'), seconds ? formatTotal(seconds) : ''].filter(Boolean).join(' · ');
+    return el('div', { class: 'disc-head' },
+      icon('album'),
+      el('h2', { class: 'disc-title' }, `Disc ${group.disc}`),
+      el('span', { class: 'disc-detail' }, detail),
+      el('button', {
+        class: 'page-link',
+        onclick: () => {
+          setShuffle(false);
+          startList(group.tracks, 0);
+          closeTabsForAlbum();
+        },
+      }, icon('play'), `Play Disc ${group.disc}`));
+  }
+
+  // Keeps the heading of the disc being scrolled through under the column names.
+  function stickDiscHeading(sticky, head, rows, discs, rowHeight) {
+    let shown = null;
+    return () => {
+      const offset = head.getBoundingClientRect().bottom - rows.getBoundingClientRect().top;
+      sticky.hidden = offset <= 0;
+      sticky.style.top = `${head.offsetHeight}px`;
+      const current = discs.filter((group) => group.top * rowHeight <= offset).pop() || discs[0];
+      if (current !== shown) sticky.replaceChildren(discHeading(current));
+      shown = current;
+    };
   }
 
   function emptyMessage() {
@@ -1215,7 +1285,7 @@ const App = (() => {
     if (!openMenu) return;
     openMenu.remove();
     openMenu = null;
-    document.querySelectorAll('[aria-expanded="true"]').forEach((button) => button.setAttribute('aria-expanded', 'false'));
+    document.querySelectorAll('[aria-expanded="true"]:not([data-tab])').forEach((button) => button.setAttribute('aria-expanded', 'false'));
   }
 
   // items: { label, action, detail?, checked?, radio?, accent? }, { heading } or 'line'.
@@ -1476,18 +1546,24 @@ const App = (() => {
 
     const boxes = new Map();
     const fieldset = single ? SONG_FIELDS : ALBUM_FIELDS;
-    const grid = el('div', { class: 'editor-grid' }, ...fieldset.map((field) => {
+    const fieldCell = (field, span = field.span) => {
       const shared = commonValue(field.key);
       const input = fieldBox(field, shared ?? '', field.key, shared === null ? 'Multiple values' : '');
       boxes.set(field.key, input);
-      return el('label', { class: 'editor-field', style: `grid-column: span ${field.span}` }, field.label, input);
-    }));
+      return el('label', { class: 'editor-field', style: `grid-column: span ${span}` }, field.label, input);
+    };
+    const isStepField = (field) => STEP_FIELDS.some(({ key }) => key === field.key);
+    const songField = (key) => SONG_FIELDS.find((field) => field.key === key);
+    const grid = el('div', { class: 'editor-grid' }, ...(stepList
+      ? STEP_FIELDS.map(({ key, span }) => fieldCell(songField(key), span))
+      : fieldset.map((field) => fieldCell(field))));
+    const moreGrid = stepList ? el('div', { class: 'editor-grid' }, ...fieldset.filter((field) => !isStepField(field)).map((field) => fieldCell(field))) : null;
 
     const compilation = el('input', { type: 'checkbox', onchange: () => dirty.add('compilation') });
     const sharedCompilation = commonValue('compilation');
     compilation.checked = sharedCompilation === true;
     compilation.indeterminate = sharedCompilation === null;
-    grid.append(el('label', { class: 'editor-check' }, compilation, single ? 'Part of a compilation' : 'Compilation by various artists'));
+    (moreGrid || grid).append(el('label', { class: 'editor-check' }, compilation, single ? 'Part of a compilation' : 'Compilation by various artists'));
 
     const rowBoxes = [];
     const songList = single ? null : el('div', { class: 'editor-rows' }, ...tracks.map((track, i) => {
@@ -1611,7 +1687,9 @@ const App = (() => {
     const backButton = el('button', { class: 'secondary editor-step', type: 'button', onclick: () => goTo(stepAt - 1) }, icon('back'), backLabel);
     const nextButton = el('button', { class: 'secondary editor-step editor-step-next', type: 'button', onclick: () => goTo(stepAt + 1) }, nextLabel, icon('back'));
     const title = el('h2', { class: 'dialog-title' });
-    const dialog = el('dialog', { class: 'dialog editor' });
+    const dialog = el('dialog', { class: `dialog editor ${stepList ? 'editor-stepping' : ''}` });
+    const moreDetails = stepList ? el('details', { class: 'editor-more' }, el('summary', {}, 'All Details'), moreGrid) : null;
+    if (moreDetails) moreDetails.addEventListener('toggle', () => dialog.classList.toggle('editor-more-open', moreDetails.open));
     let stepAt = stepList ? stepList.indexOf(firstTracks[0]) : -1;
 
     function showTitle() {
@@ -1790,7 +1868,7 @@ const App = (() => {
               showCover();
             },
           }, 'Remove Cover')),
-        grid),
+        el('div', { class: 'editor-main' }, grid, moreDetails)),
       songList ? el('div', { class: 'editor-row editor-row-head' }, ...ROW_FIELDS.map((field) => el('span', {}, field.label))) : null,
       songList,
       warning,
@@ -2045,7 +2123,7 @@ const App = (() => {
     ipodStamp = stamp;
     ipod = found;
     if (!ipod) ipodOpen = false;
-    ipodSongs = ipod && ipod.state === 'ready' ? await Host.ipodSongs() : [];
+    ({ songs: ipodSongs, lists: ipodLists } = ipod && ipod.state === 'ready' ? await Host.ipodSongs() : { songs: [], lists: [] });
     renderDevices();
     if (ipodOpen || !ipod) renderMain();
   }
@@ -2075,6 +2153,8 @@ const App = (() => {
     const groups = [];
     const music = tracksIn('music').filter(canSyncTrack);
     if (music.length) groups.push({ id: 'music', label: 'Music', word: 'song', tracks: music });
+    const own = UserData.playlists.length;
+    if (own) groups.push({ id: 'playlists', label: 'My Playlists', detail: plural(own, 'playlist'), tracks: [] });
     for (const { id, word } of [{ id: 'podcasts', word: 'episode' }, { id: 'audiobooks', word: 'file' }]) {
       for (const group of Library.groups('album', tracksIn(id).filter(canSyncTrack), { byName: true })) {
         groups.push({ id: `${id}:${group.value}`, label: group.label, word, tracks: group.tracks });
@@ -2088,7 +2168,11 @@ const App = (() => {
     const unticked = untickedGroups();
     const groups = syncGroups();
     const wanted = groups.filter((group) => !unticked.has(group.id)).flatMap((group) => group.tracks);
-    const plan = IpodPlan.compute({ wanted, ipodSongs, fold: Library.fold });
+    const playlists = unticked.has('playlists') ? [] : UserData.playlists.map((list) => ({
+      name: list.name,
+      tracks: list.songs.map(Library.byKey).filter((track) => track && canSyncTrack(track)),
+    }));
+    const plan = IpodPlan.compute({ wanted, ipodSongs, fold: Library.fold, playlists, ipodLists, managed: UserData.ipodPlaylists });
     const addBytes = plan.additions.reduce((sum, t) => sum + t.file.size, 0);
     const skipped = Library.tracks.length - tracksIn('music').filter(canSyncTrack).length
       - tracksIn('podcasts').filter(canSyncTrack).length - tracksIn('audiobooks').filter(canSyncTrack).length;
@@ -2108,13 +2192,15 @@ const App = (() => {
     return brought;
   }
 
+  const planChanges = (plan) => plan.additions.length + plan.removals.length + plan.updates.length + plan.lists.writes.length + plan.lists.deletes.length;
+
   async function startSync() {
     if (!IpodPlan.canSync({ driveMissing, refreshing, scanning, songCount: Library.tracks.length })) {
       showToast(driveMissing ? missingMessage() : 'Your library isn\'t ready. Try again in a moment.');
       return;
     }
     const plan = planSync();
-    if (!plan.additions.length && !plan.removals.length && !plan.updates.length) {
+    if (!planChanges(plan)) {
       const brought = bringBackPlays();
       showToast(brought ? `Brought back ${plural(brought, 'play')}. Your iPod is already up to date.` : 'Your iPod is already up to date.');
       renderMain();
@@ -2130,6 +2216,8 @@ const App = (() => {
     }
 
     bringBackPlays();
+    UserData.setIpodPlaylists(IpodPlan.playlistsToRemember(UserData.ipodPlaylists, plan.lists));
+    UserData.flush();
     ipodResult = null;
     ipodSync = { phase: 'preparing' };
     renderMain();
@@ -2137,6 +2225,7 @@ const App = (() => {
       const result = await Host.syncIpod({
         removals: plan.removals.map((t) => t.path),
         updates: plan.updates,
+        lists: { writes: plan.lists.writes, deletes: plan.lists.deletes },
         additions: plan.additions.map((t) => ({
           fullPath: t.file.fullPath,
           title: t.title,
@@ -2156,6 +2245,8 @@ const App = (() => {
         if (ipodOpen) renderMain();
       });
       ipodResult = result;
+      UserData.setIpodPlaylists(IpodPlan.playlistsToRemember(UserData.ipodPlaylists, plan.lists, result.playlists));
+      UserData.flush();
     } catch (err) {
       ipodResult = { problem: saveProblem(err) };
     }
@@ -2194,9 +2285,10 @@ const App = (() => {
           el('div', { class: 'notice-title' }, 'The sync didn\'t finish'),
           el('div', { class: 'notice-detail' }, ipodResult.problem)));
     }
-    const { added, removed, updated, failures } = ipodResult;
+    const { added, removed, updated, playlists, failures } = ipodResult;
     const parts = [`Added ${plural(added, 'song')}`, `removed ${plural(removed, 'song')}`];
     if (updated) parts.push(`updated ${plural(updated, 'song')}`);
+    if (playlists) parts.push(`changed ${plural(playlists, 'playlist')}`);
     return el('div', { class: 'notice', role: 'status' },
       el('div', { class: 'notice-text' },
         el('div', { class: 'notice-title' }, 'Sync finished'),
@@ -2230,23 +2322,25 @@ const App = (() => {
       box.checked = !plan.unticked.has(group.id);
       return el('label', { class: 'sync-row' }, box,
         el('span', { class: 'sync-row-name' }, group.label),
-        el('span', { class: 'sync-row-detail' }, `${plural(group.tracks.length, group.word)} · ${formatGb(bytes)}`));
+        el('span', { class: 'sync-row-detail' }, group.detail || `${plural(group.tracks.length, group.word)} · ${formatGb(bytes)}`));
     });
 
     const summary = [
       ['Add', plan.additions.length ? `${plural(plan.additions.length, 'song')}, ${formatGb(plan.addBytes)}` : 'Nothing'],
       ['Remove', plan.removals.length ? `${plural(plan.removals.length, 'song')}, ${formatGb(removedBytes)}` : 'Nothing'],
       ...(plan.updates.length ? [['Update', plural(plan.updates.length, 'song')]] : []),
+      ...(plan.lists.writes.length + plan.lists.deletes.length ? [['Playlists', [plan.lists.writes.length ? `${plan.lists.writes.length} to send` : '', plan.lists.deletes.length ? `${plan.lists.deletes.length} to remove` : ''].filter(Boolean).join(', ')]] : []),
       ['Bring back', played ? `${plural(played, 'play')} from your iPod` : 'No new plays'],
       ['Free after sync', fits ? formatGb(freeAfter) : `Short of ${formatGb(IPOD_SPARE_BYTES - freeAfter)}`],
     ];
-    const nothingToDo = !plan.additions.length && !plan.removals.length && !plan.updates.length && !played;
+    const nothingToDo = !planChanges(plan) && !played;
     return [
       ipodResult ? renderSyncResult() : null,
       el('div', { class: 'sync-layout' },
         el('div', { class: 'sync-list' },
           el('h2', { class: 'shelf-heading' }, 'What Goes on Your iPod'),
           ...rows,
+          plan.lists.conflicts.length ? el('p', { class: 'sync-note' }, `Your iPod already has its own ${plan.lists.conflicts.length === 1 ? 'playlist' : 'playlists'} called ${plan.lists.conflicts.map((name) => `“${name}”`).join(', ')}, so ${plan.lists.conflicts.length === 1 ? 'yours with that name won\'t' : 'yours with those names won\'t'} be sent. Rename ${plan.lists.conflicts.length === 1 ? 'it' : 'them'} here to send ${plan.lists.conflicts.length === 1 ? 'it' : 'them'}.`) : null,
           plan.skipped > 0 ? el('p', { class: 'sync-note' }, `${plural(plan.skipped, 'song')} in other formats can't go on an iPod yet, so ${plan.skipped === 1 ? 'it stays' : 'they stay'} off.`) : null),
         el('div', { class: 'sync-summary' },
           el('h2', { class: 'shelf-heading' }, 'This Sync'),
@@ -2662,10 +2756,15 @@ const App = (() => {
     updateNowHeart();
 
     const nowArt = $('#now-art');
+    const backdrop = $('#backdrop-art');
     nowArt.hidden = true;
     Covers.forTrack(track).then((url) => {
-      if (Player.track !== track || !url) return;
+      if (Player.track !== track) return;
+      // The tint behind the window follows the song, and goes with no cover.
+      backdrop.hidden = !url;
+      if (!url) return;
       nowArt.src = url;
+      backdrop.src = url;
       nowArt.hidden = false;
       if ('mediaSession' in navigator) {
         navigator.mediaSession.metadata = new MediaMetadata({
@@ -3009,8 +3108,26 @@ const App = (() => {
     Player.on('unplayable', (track) => showToast(`Skipped “${track.title}”: this browser can't play it.`));
   }
 
+  // The window has no system title bar, so the play bar carries these.
+  function setupWindowControls() {
+    const box = $('.window-controls');
+    box.hidden = false;
+    box.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-window]');
+      if (button) Host.windowControl(button.dataset.window);
+    });
+    const maximise = $('.window-maximise');
+    Host.onMaximised((maximised) => {
+      const label = maximised ? 'Restore' : 'Maximise';
+      maximise.setAttribute('aria-label', label);
+      maximise.setAttribute('title', label);
+      maximise.querySelector('use').setAttribute('href', maximised ? '#i-restore' : '#i-maximise');
+    });
+  }
+
   async function init() {
     document.documentElement.classList.toggle('desktop-app', Boolean(Host));
+    if (Host) setupWindowControls();
     await UserData.load();
     restoreShelf();
     wireEvents();

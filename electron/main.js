@@ -139,6 +139,14 @@ function setupIpc() {
   });
 
   ipcMain.handle('host:set-mini', (_event, on) => setMiniPlayer(on));
+  ipcMain.handle('host:window', (_event, action) => {
+    if (!mainWindow) return;
+    if (action === 'minimise') mainWindow.minimize();
+    else if (action === 'maximise') {
+      if (mainWindow.isMaximized()) mainWindow.unmaximize();
+      else if (mainWindow.isMaximizable()) mainWindow.maximize();
+    } else if (action === 'close') mainWindow.close();
+  });
   ipcMain.handle('host:set-mini-queue', (_event, open) => setMiniQueue(open));
   ipcMain.handle('host:read-data', () => readUserData());
   ipcMain.handle('host:write-data', (_event, data) => writeUserData(data));
@@ -284,10 +292,9 @@ function createWindow() {
     minWidth: 640,
     minHeight: 560,
     title: 'Music',
-    backgroundColor: '#241a20',
-    // The purple top bar replaces the system's title bar; these match its colours.
-    titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#3a1530', symbolColor: '#f7f2f5', height: 36 },
+    backgroundColor: '#f6f4f2',
+    // No system title bar: the play bar has its own window buttons, so they match the tint.
+    frame: false,
     icon: path.join(__dirname, 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -297,6 +304,9 @@ function createWindow() {
     },
   });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const sendMaximised = () => mainWindow.webContents.send('host:maximised', mainWindow.isMaximized());
+  mainWindow.on('maximize', sendMaximised);
+  mainWindow.on('unmaximize', sendMaximised);
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
   mainWindow.on('closed', () => { mainWindow = null; });
   mainWindow.loadFile(path.join(__dirname, '..', 'index.html'));

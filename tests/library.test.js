@@ -92,3 +92,24 @@ test('tags cached by an older version are still used', async () => {
   await Library.ingest([{ file, path: 'm/1.mp3' }]);
   assert.strictEqual(Library.tracks[0].title, 'From Old Cache');
 });
+
+const onDisc = (discNo, title) => ({ discNo, title });
+const groupTitles = (groups) => [...groups].map((g) => [g.disc, [...g.tracks].map((t) => t.title)]);
+
+test('an album splits by disc', () => {
+  const { Library } = setup();
+  const groups = Library.discGroups([onDisc(1, 'a'), onDisc(1, 'b'), onDisc(2, 'c')]);
+  assert.deepStrictEqual(groupTitles(groups), [[1, ['a', 'b']], [2, ['c']]]);
+});
+
+test('a single disc has no groups, even with no disc number', () => {
+  const { Library } = setup();
+  assert.strictEqual(Library.discGroups([onDisc(1, 'a'), onDisc(1, 'b')]), null);
+  assert.strictEqual(Library.discGroups([onDisc(null, 'a'), onDisc(1, 'b')]), null, 'no number means disc 1');
+  assert.strictEqual(Library.discGroups([onDisc(2, 'a')]), null, 'only disc 2 of a set');
+});
+
+test('songs that don\'t run disc by disc have no groups', () => {
+  const { Library } = setup();
+  assert.strictEqual(Library.discGroups([onDisc(1, 'a'), onDisc(2, 'b'), onDisc(1, 'c')]), null);
+});
